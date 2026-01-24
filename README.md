@@ -73,7 +73,7 @@ The system processes entire chapters in batches, maintaining narrative context a
 - **Batch processing**: Processes 3-4 pages simultaneously to maximize GPU utilization
 
 ## 📊 Performance Metrics
-- **Processing Speed**: ~2-3 pages/minute on NVIDIA T4 GPU
+- **Processing Speed**: ~3-4 pages/minute on NVIDIA T4 GPU
 - **Bubble Detection Accuracy**: 95%+ recall on standard manga layouts
 - **Translation Quality**: Context-aware translations maintain character voice and narrative consistency
 - **Memory Efficiency**: Font caching and vectorized operations reduce overhead by ~40%
@@ -101,7 +101,7 @@ pip install -r requirements.txt
 3. **Download models**
 ```bash
 # Download YOLOv8 manga bubble detector
-wget https://path-to-model/comic_yolov8m.pt
+https://huggingface.co/ogkalu/comic-speech-bubble-detector-yolov8m
 
 # Install Ollama and pull Qwen model
 ollama pull qwen2.5:7b
@@ -141,7 +141,7 @@ translator.process_chapter(
 )
 ```
 
-### Advanced: Custom Character Names
+### Custom Character Names
 ```python
 # Define character name mappings
 custom_translations = {
@@ -207,7 +207,6 @@ manga-translation-pipeline/
 ### "No bubbles detected"
 - Try adjusting `conf_threshold` (default: 0.2)
 - Ensure input images are high resolution (≥1200px width recommended)
-- Check if manga style matches training data (modern manga works best)
 
 ### Translation contains Japanese characters
 - Pipeline automatically retries with individual translation
@@ -220,33 +219,17 @@ manga-translation-pipeline/
 - Lower YOLOv8 input resolution
 
 ## 📈 Future Improvements
-- [ ] Support for vertical text detection
 - [ ] Multi-GPU distributed processing
 - [ ] Fine-tuned translation model on manga corpus
 - [ ] Web UI for non-technical users
 - [ ] Support for webtoon/manhwa formats
 - [ ] Quality assessment metrics (BLEU, human evaluation)
 
-## 🤝 Contributing
-Contributions welcome! Areas of interest:
-- Training data for bubble detection on diverse manga styles
-- Translation quality benchmarks
-- Support for additional languages (Korean, Chinese)
-- Typesetting improvements (kerning, ligatures)
-
-## 📄 License
-MIT License - see LICENSE file for details
-
 ## 🙏 Acknowledgments
 - **MangaOCR** by kha-white for specialized Japanese OCR
-- **Ultralytics YOLOv8** for object detection framework
+- **Ultralytics comic_YOLOv8** by ogkalu https://huggingface.co/ogkalu/comic-speech-bubble-detector-yolov8m
 - **Ollama** for local LLM inference
-- Training dataset from [source if applicable]
 
-## 📧 Contact
-Víctor Ángel Ruiz Espinoza - [vianrues@gmail.com](mailto:vianrues@gmail.com)
-
-Project Link: [https://github.com/ArsVie/manga-translation-pipeline](https://github.com/ArsVie/manga-translation-pipeline)
 
 ---
 
