@@ -13,7 +13,7 @@ from manga_ocr import MangaOcr
 
 class MangaTranslator:
     def __init__(self, yolo_model_path='comic_yolov8m.pt', ollama_model="qwen2.5:7b",
-                 font_path="font.ttf", custom_translations=None):
+                 font_path="font.ttf", custom_translations=None, keep_honorifics=True):
         """
         Initialize models. Defaults to qwen2.5:7b for speed on T4 GPUs.
 
@@ -41,6 +41,9 @@ class MangaTranslator:
 
         # Custom translation dictionary
         self.custom_translations = custom_translations or {}
+
+        self.keep_honorifics = keep_honorifics
+        self.honorifics = ['san', 'chan', 'kun', 'sama', 'senpai', 'sensei', 'dono', 'tan']
 
         # For romanization fallback
         try:
@@ -147,6 +150,58 @@ class MangaTranslator:
         img[y1:y2, x1:x2] = brightened
 
         return img
+
+    def _preserve_honorifics(self, original_text, translated_text):
+        """
+        Detect and preserve Japanese honorifics in romaji form.
+        Examples: さん→-san, ちゃん→-chan, 君→-kun, 様→-sama
+        """
+        if not self.keep_honorifics or not self.kakasi:
+            return translated_text
+
+        # Common honorific patterns in Japanese
+        honorific_map = {
+            'さん': '-san',
+            'ちゃん': '-chan',
+            'くん': '-kun',
+            '君': '-kun',
+            '様': '-sama',
+            'さま': '-sama',
+            '先輩': '-senpai',
+            'せんぱい': '-senpai',
+            '先生': '-sensei',
+            'せんせい': '-sensei',
+            '殿': '-dono',
+            'どの': '-dono',
+            'たん': '-tan',
+        }
+
+        # Find honorifics in original text
+        found_honorifics = []
+        for jp_hon, rom_hon in honorific_map.items():
+            if jp_hon in original_text:
+                found_honorifics.append(rom_hon)
+
+        # If we found honorifics, try to add them back to names in translation
+        if found_honorifics:
+            # Split into words and check last word for potential name
+            words = translated_text.split()
+            if len(words) >= 1:
+                # Check if translation already has honorific
+                last_word = words[-1].lower()
+                has_honorific = any(hon.strip('-') in last_word for hon in self.honorifics)
+
+                if not has_honorific and found_honorifics:
+                    # Add the first found honorific to what's likely a name
+                    # Look for capitalized words (likely names)
+                    for i in range(len(words) - 1, -1, -1):
+                        if words[i] and words[i][0].isupper():
+                            # Add honorific to this name
+                            words[i] = words[i] + found_honorifics[0]
+                            translated_text = ' '.join(words)
+                            break
+
+        return translated_text
 
     def _draw_text_with_outline(self, draw, position, text, font,
                                  text_color="black", outline_color="white",
@@ -564,6 +619,7 @@ Description: {series_info.get('description', 'None')}
 
 if __name__ == "__main__":
     # Define custom character/term translations
+    #Example
     custom_translations = {
         "ルーグ": "Lugh",
         "トウアハーデ": "Tuatha Dé",
@@ -573,13 +629,14 @@ if __name__ == "__main__":
     }
 
     translator = MangaTranslator(
-        yolo_model_path='comic_yolov8m.pt',
+        yolo_model_path='/content/drive/MyDrive/comic-speech-bubble-detector.pt',
         ollama_model="qwen2.5:7b",
-        font_path="font.ttf",
+        font_path="/content/drive/MyDrive/anime_ace_bb/animeace2bb_tt/animeace2_reg.ttf",
         custom_translations=custom_translations
     )
 
     # Define Series Context
+    #Example:
     series_context = {
         "title": "Sekai Saikou no Ansatsusha, Isekai Kizoku ni Tensei Suru",
         "tags": "Action, Adventure, Comedy, Drama, Ecchi, Fantasy, Harem, Romance",
@@ -588,10 +645,10 @@ if __name__ == "__main__":
 
     # Example 1: Process all batches
     translator.process_chapter(
-        input_folder='/content/raw_chapter',
+        input_folder='/content/drive/MyDrive/sekai-saikou-no-ansatsusha-isekai-kizoku-ni-tensei-suru-chapter-401',
         output_folder='/content/translated_chapter',
         series_info=series_context,
-        batch_size=3
+        batch_size=4
     )
 
     # Example 2: Process only specific batches (e.g., batches 1 and 3)
