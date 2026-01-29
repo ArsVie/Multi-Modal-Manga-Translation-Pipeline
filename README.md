@@ -3,7 +3,7 @@ An end-to-end machine learning pipeline that automatically detects, extracts, tr
 
 ![Original page -- Translated page](Input_Output.png)
 
-## 🎯 Overview
+##  Overview
 Traditional manga translation is labor-intensive, requiring manual bubble detection, text extraction, translation, and typesetting. This project automates the entire workflow by combining:
 - **YOLOv8** for speech bubble detection
 - **MangaOCR** for Japanese text extraction
@@ -12,7 +12,7 @@ Traditional manga translation is labor-intensive, requiring manual bubble detect
 
 The system processes entire chapters in batches, maintaining narrative context across pages for coherent translations.
 
-## 🏗️ Architecture
+##  Architecture
 
 ```
 ┌─────────────┐      ┌──────────────┐      ┌─────────────┐      ┌──────────────┐
@@ -43,7 +43,7 @@ The system processes entire chapters in batches, maintaining narrative context a
                                           └─────────────────┘
 ```
 
-## ✨ Key Features
+##  Key Features
 
 ### 1. Intelligent Bubble Detection
 - **Adaptive confidence thresholds**: Automatically retries with lower confidence if no bubbles detected
@@ -71,13 +71,13 @@ The system processes entire chapters in batches, maintaining narrative context a
 - **Ollama integration**: Utilizes T4/A100 GPUs for LLM translation
 - **Batch processing**: Processes 3-4 pages simultaneously to maximize GPU utilization
 
-## 📊 Performance Metrics
+##  Performance Metrics
 - **Processing Speed**: ~3-4 pages/minute on NVIDIA T4 GPU
 - **Bubble Detection Accuracy**: 95%+ recall on standard manga layouts
 - **Translation Quality**: Context-aware translations maintain character voice and narrative consistency
 - **Memory Efficiency**: Font caching and vectorized operations reduce overhead by ~40%
 
-## 🚀 Installation
+##  Installation
 
 ### Prerequisites
 - Python 3.9+
@@ -111,7 +111,7 @@ Place your TrueType font (e.g., `font.ttf`) in the project root. Recommended fon
 - **Wild Words Roman** (for comic-style text)
 - **Anime Ace** (for manga aesthetic)
 
-## 💻 Usage
+## Usage
 
 ### Basic Example
 ```python
@@ -166,7 +166,7 @@ translator.process_chapter(
 )
 ```
 
-## 📁 Project Structure
+## Project Structure
 ```
 manga-translation-pipeline/
 ├── manga_translator.py          # Main pipeline class
@@ -182,14 +182,14 @@ manga-translation-pipeline/
 └── README.md
 ```
 
-## 🛠️ Technical Stack
+## Technical Stack
 - **Computer Vision**: YOLOv8 (Ultralytics), OpenCV, PIL
 - **OCR**: MangaOCR (specialized for Japanese manga)
 - **NLP/Translation**: Ollama, LangChain, Qwen 2.5 (7B parameters)
 - **Text Processing**: pyphen (hyphenation), pykakasi (romanization)
 - **Performance**: CUDA, NumPy vectorization, font caching
 
-## 🔧 Configuration Options
+## Configuration Options
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -201,7 +201,7 @@ manga-translation-pipeline/
 | `min_font_size` | 10 | Minimum text size (pt) |
 | `max_font_size` | 24 | Maximum text size (pt) |
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### "No bubbles detected"
 - Try adjusting `conf_threshold` (default: 0.2)
@@ -217,12 +217,13 @@ manga-translation-pipeline/
 - Use smaller model: `qwen2.5:3b` instead of `7b`
 - Lower YOLOv8 input resolution
 
-## 📈 Future Improvements
+## Future Improvements
 - [ ] Multi-GPU distributed processing
 - [ ] Fine-tuned translation model on manga corpus
 - [ ] Web UI for non-technical users
 - [ ] Support for webtoon/manhwa formats
 - [ ] Quality assessment metrics (BLEU, human evaluation)
+- [ ] Live version with a FastAPI framework and hosted on a AWS server
 
 ## 🙏 Acknowledgments
 - **MangaOCR** by kha-white for specialized Japanese OCR
