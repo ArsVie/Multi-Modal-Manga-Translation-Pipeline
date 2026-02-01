@@ -13,7 +13,7 @@ from manga_ocr import MangaOcr
 
 class MangaTranslator:
     def __init__(self, yolo_model_path='comic_yolov8m.pt', ollama_model="qwen2.5:7b",
-                 font_path="font.ttf", custom_translations=None, keep_honorifics=True):
+                 font_path="font.ttf", custom_translations=None, keep_honorifics=True, debug=True):
         """
         Initialize models. Defaults to qwen2.5:7b for speed on T4 GPUs.
 
@@ -280,55 +280,59 @@ class MangaTranslator:
         return text
 
     def detect_and_process(self, image_path, output_dir="crops", page_id="", conf_threshold=0.2):
-        """
-        Detect bubbles with adaptive confidence threshold
-        """
-        image = cv2.imread(image_path)
-        if image is None:
-            raise ValueError(f"Image not found at {image_path}")
+            image = cv2.imread(image_path)
+            if image is None: raise ValueError(f"Not found: {image_path}")
 
-        # Try detection with initial confidence
-        results = self.yolo_model.predict(source=image, conf=conf_threshold, save=False, verbose=False)
-        bubbles = [list(map(int, box.xyxy[0].tolist())) for box in results[0].boxes]
+            # 1. Run Prediction
+            results = self.yolo_model.predict(source=image, conf=conf_threshold, save=False, verbose=False)
+            
+            # Get the class names dictionary (e.g., {0: 'text', 1: 'bubble'})
+            class_names = results[0].names 
 
-        # If no bubbles found, try with lower confidence
-        if not bubbles and conf_threshold > 0.1:
-            print(f"    No bubbles found with conf={conf_threshold}, retrying with conf=0.1...")
-            results = self.yolo_model.predict(source=image, conf=0.1, save=False, verbose=False)
-            bubbles = [list(map(int, box.xyxy[0].tolist())) for box in results[0].boxes]
+            # 2. Extract Boxes AND Classes
+            detections = []
+            for box in results[0].boxes:
+                xyxy = list(map(int, box.xyxy[0].tolist()))
+                cls_id = int(box.cls[0])
+                label = class_names[cls_id] # e.g., "text" or "bubble" or "face"
+                
+                # Filter: We only care about text/bubbles, not faces/bodies if your model detects them
+                if label in ['face', 'body']: continue 
+                
+                detections.append({
+                    "bbox": xyxy,
+                    "label": label
+                })
 
-            if bubbles:
-                print(f"    Found {len(bubbles)} bubbles with lower confidence")
+            # Sort (top to bottom, right to left for manga)
+            # Note: We need a custom sort function since detections is now a dict, not just a list of boxes
+            detections = sorted(detections, key=lambda x: (x['bbox'][1], -x['bbox'][0]))
 
-        sorted_bubbles = self._sort_bubbles(bubbles)
+            if not os.path.exists(output_dir): os.makedirs(output_dir)
 
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+            manga_data = []
+            for i, det in enumerate(detections):
+                x_min, y_min, x_max, y_max = det['bbox']
+                
+                # ... (Cropping logic stays the same) ...
+                crop = image[y_min:y_max, x_min:x_max]
+                
+                # Save crop
+                crop_filename = f"bubble_{page_id}_{i+1}.png"
+                crop_path = os.path.join(output_dir, crop_filename)
+                cv2.imwrite(crop_path, crop)
 
-        manga_data = []
-        for i, box in enumerate(sorted_bubbles):
-            x_min, y_min, x_max, y_max = box
-            h, w, _ = image.shape
-
-            x_min, y_min = max(0, x_min), max(0, y_min)
-            x_max, y_max = min(w, x_max), min(h, y_max)
-
-            crop = image[y_min:y_max, x_min:x_max]
-            if crop.size == 0: continue
-
-            crop_filename = f"bubble_{page_id}_{i+1}.png"
-            crop_path = os.path.join(output_dir, crop_filename)
-            cv2.imwrite(crop_path, crop)
-
-            manga_data.append({
-                "id": f"{page_id}_{i+1}",
-                "page_id": page_id,
-                "bbox": [x_min, y_min, x_max, y_max],
-                "crop_path": crop_path,
-                "original_text": "",
-                "translated_text": ""
-            })
-        return image, manga_data
+                manga_data.append({
+                    "id": f"{page_id}_{i+1}",
+                    "page_id": page_id,
+                    "bbox": [x_min, y_min, x_max, y_max],
+                    "label": det['label'],
+                    "crop_path": crop_path,
+                    "original_text": "",
+                    "translated_text": ""
+                })
+                
+            return image, manga_data
 
     def run_ocr(self, manga_data):
         for entry in manga_data:
@@ -525,97 +529,108 @@ Description: {series_info.get('description', 'None')}
         print(f"  Saved: {output_path}")
 
     def process_chapter(self, input_folder, output_folder, series_info=None,
-                       batch_size=4, selected_batches=None):
-        """
-        Process manga chapter in batches for better context and efficiency
+                          batch_size=4, selected_batches=None):
+            """
+            Process manga chapter in batches for better context and efficiency
+            """
+            if not os.path.exists(output_folder):
+                os.makedirs(output_folder)
 
-        Args:
-            input_folder: Folder containing raw manga pages
-            output_folder: Output folder for translated pages
-            series_info: Dictionary with series context (title, tags, description)
-            batch_size: Number of pages to process together (default: 4)
-            selected_batches: List of batch numbers to process (e.g., [1, 3, 5]) or None for all
-        """
-        if not os.path.exists(output_folder):
-            os.makedirs(output_folder)
+            valid_ext = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
+            files = [f for f in os.listdir(input_folder) if f.lower().endswith(valid_ext)]
+            # Sort numerically (p1, p2, p10 instead of p1, p10, p2)
+            files.sort(key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else x)
 
-        valid_ext = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
-        files = [f for f in os.listdir(input_folder) if f.lower().endswith(valid_ext)]
-        files.sort(key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else x)
+            total_files = len(files)
+            total_batches = (total_files + batch_size - 1) // batch_size
+            
+            # Master list to hold data for the entire chapter
+            full_chapter_data = [] 
 
-        total_files = len(files)
-        total_batches = (total_files + batch_size - 1) // batch_size
+            print(f"Found {total_files} images in {input_folder}")
+            print(f"Total batches: {total_batches} (batch size: {batch_size})")
 
-        print(f"Found {total_files} images in {input_folder}")
-        print(f"Total batches: {total_batches} (batch size: {batch_size})")
+            if selected_batches:
+                print(f"Processing selected batches: {selected_batches}")
+            else:
+                print(f"Processing all batches\n")
 
-        if selected_batches:
-            print(f"Processing selected batches: {selected_batches}")
-        else:
-            print(f"Processing all batches\n")
+            # Process in batches
+            for batch_start in range(0, total_files, batch_size):
+                batch_num = batch_start // batch_size + 1
 
-        # Process in batches
-        for batch_start in range(0, total_files, batch_size):
-            batch_num = batch_start // batch_size + 1
-
-            # Skip if not in selected batches
-            if selected_batches and batch_num not in selected_batches:
-                continue
-
-            batch_files = files[batch_start:batch_start + batch_size]
-
-            print(f"=== Batch {batch_num}/{total_batches} ({len(batch_files)} pages) ===")
-
-            # Collect all data for this batch
-            batch_data = []
-            batch_images = []
-
-            temp_crop_dir = os.path.join(output_folder, "temp_crops")
-
-            for idx, filename in enumerate(batch_files):
-                page_num = batch_start + idx + 1
-                print(f"  [{page_num}/{total_files}] Detecting bubbles in {filename}...")
-
-                input_path = os.path.join(input_folder, filename)
-                page_id = f"p{page_num:03d}"
-
-                try:
-                    img, data = self.detect_and_process(input_path, output_dir=temp_crop_dir, page_id=page_id)
-
-                    if data:
-                        print(f"    Running OCR on {len(data)} bubbles...")
-                        data = self.run_ocr(data)
-                        batch_data.extend(data)
-                    else:
-                        print(f"    No bubbles detected")
-
-                    batch_images.append((filename, img, page_id))
-
-                except Exception as e:
-                    print(f"    Error processing {filename}: {e}")
+                # Skip if not in selected batches
+                if selected_batches and batch_num not in selected_batches:
                     continue
 
-            # Translate entire batch at once for context
-            if batch_data:
-                print(f"  Translating {len(batch_data)} bubbles from batch...")
-                batch_data = self.translate_batch(batch_data, series_info=series_info)
+                batch_files = files[batch_start:batch_start + batch_size]
+                print(f"=== Batch {batch_num}/{total_batches} ({len(batch_files)} pages) ===")
 
-            # Typeset each page
-            print(f"  Typesetting pages...")
-            for filename, img, page_id in batch_images:
-                output_path = os.path.join(output_folder, filename)
+                # Collect all data for this batch
+                batch_data = []
+                batch_images = []
 
-                # Filter data for this specific page
-                page_data = [d for d in batch_data if d.get('page_id') == page_id]
+                temp_crop_dir = os.path.join(output_folder, "temp_crops")
 
+                for idx, filename in enumerate(batch_files):
+                    page_num = batch_start + idx + 1
+                    print(f"  [{page_num}/{total_files}] Detecting bubbles in {filename}...")
+
+                    input_path = os.path.join(input_folder, filename)
+                    page_id = f"p{page_num:03d}"
+
+                    try:
+                        img, data = self.detect_and_process(input_path, output_dir=temp_crop_dir, page_id=page_id)
+
+                        if data:
+                            print(f"    Running OCR on {len(data)} bubbles...")
+                            data = self.run_ocr(data)
+                            batch_data.extend(data)
+                        else:
+                            print(f"    No bubbles detected")
+
+                        batch_images.append((filename, img, page_id))
+
+                    except Exception as e:
+                        print(f"    Error processing {filename}: {e}")
+                        continue
+
+                # Translate entire batch at once for context
+                if batch_data:
+                    print(f"  Translating {len(batch_data)} bubbles from batch...")
+                    batch_data = self.translate_batch(batch_data, series_info=series_info)
+                    
+                    # Add this batch's completed data to the master list
+                    full_chapter_data.extend(batch_data)
+
+                # Typeset each page
+                print(f"  Typesetting pages...")
+                for filename, img, page_id in batch_images:
+                    output_path = os.path.join(output_folder, filename)
+
+                    # Filter data for this specific page
+                    page_data = [d for d in batch_data if d.get('page_id') == page_id]
+
+                    try:
+                        self.typeset(img, page_data, output_path)
+                    except Exception as e:
+                        print(f"    Error typesetting {filename}: {e}")
+
+                print()  # Empty line between batches
+            
+            # --- NEW LOGIC: Save JSON if debug is ON ---
+            if self.debug and full_chapter_data:
+                json_filename = f"chapter_data_{int(time.time())}.json"
+                json_path = os.path.join(output_folder, json_filename)
+                
                 try:
-                    self.typeset(img, page_data, output_path)
+                    with open(json_path, 'w', encoding='utf-8') as f:
+                        json.dump(full_chapter_data, f, ensure_ascii=False, indent=2)
+                    print(f"  [DEBUG] Saved full chapter data to: {json_filename}")
                 except Exception as e:
-                    print(f"    Error typesetting {filename}: {e}")
+                    print(f"  [DEBUG] Failed to save JSON: {e}")
 
-            print()  # Empty line between batches
-
-        print(f"\n✓ Chapter processing complete! Output saved to: {output_folder}")
+            print(f"\n✓ Chapter processing complete! Output saved to: {output_folder}")
 
 if __name__ == "__main__":
     # Define custom character/term translations
