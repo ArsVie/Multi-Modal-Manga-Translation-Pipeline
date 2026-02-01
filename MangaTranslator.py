@@ -629,9 +629,9 @@ if __name__ == "__main__":
     }
 
     translator = MangaTranslator(
-        yolo_model_path='/content/drive/MyDrive/comic-speech-bubble-detector.pt',
+        yolo_model_path='comic-speech-bubble-detector.pt',
         ollama_model="qwen2.5:7b",
-        font_path="/content/drive/MyDrive/anime_ace_bb/animeace2bb_tt/animeace2_reg.ttf",
+        font_path="animeace2_reg.ttf",
         custom_translations=custom_translations
     )
 
@@ -645,16 +645,16 @@ if __name__ == "__main__":
 
     # Example 1: Process all batches
     translator.process_chapter(
-        input_folder='/content/drive/MyDrive/sekai-saikou-no-ansatsusha-isekai-kizoku-ni-tensei-suru-chapter-401',
-        output_folder='/content/translated_chapter',
+        input_folder='/Your_Chapter_Folder',
+        output_folder='/Output_Folder',
         series_info=series_context,
-        batch_size=4
+        batch_size=4 # Depends on your GPU, I found the sweet spot around 3-4 with T4 GPU
     )
 
     # Example 2: Process only specific batches (e.g., batches 1 and 3)
     # translator.process_chapter(
-    #     input_folder='/content/raw_chapter',
-    #     output_folder='/content/translated_chapter',
+    #     input_folder='/Your_Chapter_Folder',
+    #     output_folder='/Output_Folder',
     #     series_info=series_context,
     #     batch_size=4,
     #     selected_batches=[1, 3]  # Only process batches 1 and 3
