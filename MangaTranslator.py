@@ -24,6 +24,9 @@ class MangaTranslator:
         self.yolo_model = YOLO(yolo_model_path)
         self.font_path = font_path
 
+        print("Loading LaMa Inpainting model...")
+        self.lama = SimpleLama()
+
         print("Loading MangaOCR model...")
         self.mocr = MangaOcr()
 
@@ -219,33 +222,47 @@ class MangaTranslator:
         # Draw main text
         draw.multiline_text(position, text, fill=text_color, font=font, **kwargs)
 
-    def _calculate_optimal_font_size(self, text, bbox, min_size=10, max_size=24):
-        """
-        Dynamically calculate font size based on bubble dimensions and text length
-        """
-        x1, y1, x2, y2 = bbox
-        box_width = x2 - x1
-        box_height = y2 - y1
+    def _calculate_optimal_font_size(self, text, bbox, min_size=12, max_size=36):
+            x1, y1, x2, y2 = bbox
+            box_width = x2 - x1
+            box_height = y2 - y1
 
-        # Start with max size and reduce until text fits
-        for size in range(max_size, min_size - 1, -1):
-            font = self._get_font(size)
-            wrapped = self._wrap_text_dynamic(text, font, box_width - 10)
+            # --- NEW LOGIC: DETECT VERTICAL BUBBLES ---
+            # If height is 1.5x bigger than width, it's a vertical speech bubble.
+            is_vertical = box_height > (box_width * 1.5)
 
-            # Check if it fits height-wise
-            temp_draw = ImageDraw.Draw(Image.new('RGB', (1, 1)))
-            left, top, right, bottom = temp_draw.multiline_textbbox(
-                (0, 0), wrapped, font=font, align="center"
-            )
-            text_height = bottom - top
+            # If vertical, force text to use only 60% of width (makes a column)
+            # If horizontal, use 90% of width (standard)
+            target_width_ratio = 0.6 if is_vertical else 0.9
 
-            if text_height < (box_height - 10):
-                return size, wrapped
+            # Start with max size and reduce until text fits
+            for size in range(max_size, min_size - 1, -1):
+                font = self._get_font(size)
 
-        # Return minimum size with wrapped text
-        font = self._get_font(min_size)
-        wrapped = self._wrap_text_dynamic(text, font, box_width - 10)
-        return min_size, wrapped
+                # Use the calculated target width
+                max_line_width = int(box_width * target_width_ratio)
+                wrapped = self._wrap_text_dynamic(text, font, max_line_width)
+
+                # Measure resulting text block
+                temp_draw = ImageDraw.Draw(Image.new('RGB', (1, 1)))
+                left, top, right, bottom = temp_draw.multiline_textbbox(
+                    (0, 0), wrapped, font=font, align="center"
+                )
+                text_width = right - left
+                text_height = bottom - top
+
+                # Check fit (Height is the main constraint)
+                if text_height < (box_height - 10):
+                    # Secondary check: If vertical, ensure we didn't accidentally
+                    # make it too wide (overflowing the sides)
+                    if text_width < (box_width - 4):
+                        return size, wrapped
+
+            # Fallback: Minimum size
+            font = self._get_font(min_size)
+            max_line_width = int(box_width * target_width_ratio)
+            wrapped = self._wrap_text_dynamic(text, font, max_line_width)
+            return min_size, wrapped
 
     def _has_japanese_characters(self, text):
         """Check if text contains Japanese characters"""
@@ -279,7 +296,7 @@ class MangaTranslator:
             text = text.replace(jp_term, en_term)
         return text
 
-    def detect_and_process(self, image_path, output_dir="crops", page_id="", conf_threshold=0.2):
+    def detect_and_process(self, image_path, output_dir="crops", page_id="", conf_threshold=0.15):
             image = cv2.imread(image_path)
             if image is None: raise ValueError(f"Not found: {image_path}")
 
@@ -391,9 +408,9 @@ Description: {series_info.get('description', 'None')}
 """
 
         system_prompt = (
-            "You are a professional manga translator. "
+            "You are a professional manga translator."
             f"{context_str}"
-            "Translate the following Japanese text bubbles into natural, concise, colloquial English. "
+            "Translate the following Japanese sentences into natural English."
             "Use the Series Context to determine tone, slang, and character voices. "
             "Maintain dialogue consistency across pages. "
             "\n\nCRITICAL: Return ONLY a valid JSON array. No explanations, no markdown, no code blocks. "
@@ -444,19 +461,33 @@ Description: {series_info.get('description', 'None')}
 
                     # Check if translation contains Japanese characters
                     if self._has_japanese_characters(translation):
-                        print(f"    ⚠ Translation for {entry['id']} contains Japanese, retrying...")
-                        retry_translation = self._translate_single_bubble(
-                            entry['original_text'], series_info
-                        )
+                        print(f"    ⚠ Translation for {entry['id']} contains Japanese. Retrying (Max {max_retries})...")
 
-                        # If still has Japanese, romanize those parts
-                        if self._has_japanese_characters(retry_translation):
-                            print(f"    ⚠ Still has Japanese, romanizing...")
-                            retry_translation = self._romanize_japanese(retry_translation)
+                        success = False
+                        for attempt in range(max_retries):
+                            retry_text = self._translate_single_bubble(
+                                entry['original_text'], series_info
+                            )
 
-                        entry['translated_text'] = retry_translation
-                    else:
-                        entry['translated_text'] = translation
+                            # Check if the retry fixed it
+                            if not self._has_japanese_characters(retry_text):
+                                translation = retry_text
+                                success = True
+                                print(f"      ✓ Fixed on attempt {attempt + 1}")
+                                break
+                            else:
+                                print(f"      ✗ Attempt {attempt + 1} failed")
+
+                        # Fallback: Romanize if all retries failed
+                        if not success:
+                            print(f"    ⚠ All retries failed. Romanizing...")
+                            translation = self._romanize_japanese(translation)
+
+                    entry['translated_text'] = translation
+
+                # Handle missing translations (fallback to single mode)
+                elif entry.get('original_text') and not entry.get('translated_text'):
+                     entry['translated_text'] = self._translate_single_bubble(entry['original_text'], series_info)
 
         except (json.JSONDecodeError, ValueError, KeyError) as e:
             print(f"  ⚠ Translation error: {e}")
@@ -483,14 +514,103 @@ Description: {series_info.get('description', 'None')}
 
         return manga_data
 
+
+
+def clean_page(self, original_image, page_data, ellipse_padding=8, inpaint_radius=5):
+            """
+            Strict Hybrid Cleaning:
+            - text_bubble -> OpenCV Inpainting inside a shrunk Ellipse mask (Preserves tails)
+            - text_free   -> LaMa Inpainting on full Rectangle mask (Redraws background)
+            """
+            final_image = original_image.copy()
+            h, w = original_image.shape[:2]
+
+            # Mask for LaMa (Accumulates all 'text_free' areas)
+            lama_mask = np.zeros((h, w), dtype=np.uint8)
+            has_lama_work = False
+
+            for entry in page_data:
+                # Skip if no translation (optional, but good for speed)
+                if not entry.get('translated_text'): continue
+
+                bbox = entry['bbox']
+                label = entry.get('label', 'text_free')
+
+                x1, y1, x2, y2 = bbox
+
+                # Clamp coordinates
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+
+                # Extract crop for analysis
+                crop = final_image[y1:y2, x1:x2]
+                if crop.size == 0: continue
+
+                gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+
+                # --- STRATEGY 1: SPEECH BUBBLES (OpenCV + Shrunk Ellipse) ---
+                if label == 'text_bubble':
+                    ch, cw = crop.shape[:2]
+
+                    # A. Find the text pixels (dark ink)
+                    binary_text = cv2.adaptiveThreshold(
+                        gray_crop, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                        cv2.THRESH_BINARY_INV, 21, 10
+                    )
+
+                    # B. Create SHRUNK Ellipse Mask
+                    ellipse_mask = np.zeros((ch, cw), dtype=np.uint8)
+                    center = (cw // 2, ch // 2)
+                    # Shrink axes by padding to avoid touching bubble borders
+                    axes = (max(1, cw // 2 - ellipse_padding), max(1, ch // 2 - ellipse_padding))
+                    cv2.ellipse(ellipse_mask, center, axes, 0, 0, 360, 255, -1)
+
+                    # C. Combine: Mask ONLY text that is INSIDE the ellipse
+                    final_mask = cv2.bitwise_and(binary_text, ellipse_mask)
+
+                    # D. Dilate to catch anti-aliasing
+                    kernel = np.ones((5,5), np.uint8)
+                    final_mask = cv2.dilate(final_mask, kernel, iterations=1)
+
+                    # E. Run OpenCV Inpainting
+                    cleaned_crop = cv2.inpaint(crop, final_mask, inpaint_radius, cv2.INPAINT_TELEA)
+
+                    # Paste back
+                    final_image[y1:y2, x1:x2] = cleaned_crop
+
+                # --- STRATEGY 2: FREE TEXT (LaMa + Rectangle) ---
+                elif label == 'text_free':
+                    cv2.rectangle(lama_mask, (x1, y1), (x2, y2), 255, -1)
+                    has_lama_work = True
+
+            # Run LaMa batch for all free text found
+            if has_lama_work:
+                # Dilate LaMa mask slightly
+                lama_kernel = np.ones((5, 5), np.uint8)
+                lama_mask = cv2.dilate(lama_mask, lama_kernel, iterations=1)
+
+                img_pil = Image.fromarray(cv2.cvtColor(final_image, cv2.COLOR_BGR2RGB))
+                mask_pil = Image.fromarray(lama_mask)
+
+                try:
+                    # 1. Run Model
+                    cleaned_pil = self.lama(img_pil, mask_pil)
+                    cleaned_lama = cv2.cvtColor(np.array(cleaned_pil), cv2.COLOR_RGB2BGR)
+
+                    # 2. Resize fix (LaMa padding issue)
+                    if cleaned_lama.shape[:2] != (h, w):
+                        cleaned_lama = cv2.resize(cleaned_lama, (w, h))
+
+                    # 3. Merge LaMa result
+                    final_image = np.where(lama_mask[:, :, None] == 255, cleaned_lama, final_image)
+
+                except Exception as e:
+                    print(f"    ⚠ LaMa failed: {e}")
+
+            return final_image
+
     def typeset(self, original_image, manga_data, output_path):
-        working_img = original_image.copy()
-
-        # 1. Smart Clean with inpainting
-        for entry in manga_data:
-            if not entry.get('translated_text'): continue
-            working_img = self._smart_clean_bubble(working_img, entry['bbox'])
-
+        working_img = self.clean_page(original_image, manga_data)
         # 2. Text Drawing with adaptive sizing and outlines
         img_pil = Image.fromarray(cv2.cvtColor(working_img, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(img_pil)
@@ -620,7 +740,7 @@ Description: {series_info.get('description', 'None')}
             
             # --- NEW LOGIC: Save JSON if debug is ON ---
             if self.debug and full_chapter_data:
-                json_filename = f"chapter_data_{int(time.time())}.json"
+                json_filename = f"chapter_data.json"
                 json_path = os.path.join(output_folder, json_filename)
                 
                 try:
