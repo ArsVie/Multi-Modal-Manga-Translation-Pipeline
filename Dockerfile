@@ -24,7 +24,7 @@ COPY font.ttf . 2>/dev/null || true
 
 # Models are mounted at runtime or downloaded
 ENV YOLO_MODEL=/models/comic-speech-bubble-detector.pt
-ENV OLLAMA_MODEL=qwen3:8b
+ENV OLLAMA_MODEL=qwen3.5:9b
 ENV OLLAMA_HOST=http://host.docker.internal:11434
 ENV FONT_PATH=/app/font.ttf
 
