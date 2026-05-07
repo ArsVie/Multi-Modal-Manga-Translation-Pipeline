@@ -56,9 +56,9 @@ def load_models():
     """Initialize translation pipeline on server start."""
     global translator
     translator = MangaTranslator(
-        yolo_model_path=os.getenv("YOLO_MODEL", "comic-speech-bubble-detector.pt"),
+        yolo_model_path=os.getenv("YOLO_MODEL", "/tmp/manga-test-models/comic-speech-bubble-detector.pt"),
         ollama_model=os.getenv("OLLAMA_MODEL", "qwen3.5:9b"),
-        font_path=os.getenv("FONT_PATH", "font.ttf"),
+        font_path=os.getenv("FONT_PATH", "/tmp/manga-test-models/animeace2_reg.otf"),
         debug=False,
     )
 
