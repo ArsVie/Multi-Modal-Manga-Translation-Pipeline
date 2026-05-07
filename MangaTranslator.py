@@ -11,6 +11,7 @@ from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from manga_ocr import MangaOcr
 from lama_cleaner.model.lama import LaMa as SimpleLama
+from lama_cleaner.schema import Config as LamaConfig
 
 class MangaTranslator:
     def __init__(self, yolo_model_path='comic_yolov8m.pt', ollama_model="qwen2.5:7b",
@@ -27,6 +28,13 @@ class MangaTranslator:
 
         print("Loading LaMa Inpainting model...")
         self.lama = SimpleLama()
+        self.lama_config = LamaConfig(
+            ldm_steps=1,
+            hd_strategy='Original',
+            hd_strategy_crop_margin=128,
+            hd_strategy_crop_trigger_size=1280,
+            hd_strategy_resize_limit=1280,
+        )
 
         print("Loading MangaOCR model...")
         self.mocr = MangaOcr()
@@ -597,9 +605,9 @@ Description: {series_info.get('description', 'None')}
                 mask_pil = Image.fromarray(lama_mask)
 
                 try:
-                    # 1. Run Model
-                    cleaned_pil = self.lama(img_pil, mask_pil)
-                    cleaned_lama = cv2.cvtColor(np.array(cleaned_pil), cv2.COLOR_RGB2BGR)
+                    # 1. Run Model (new API expects numpy arrays and config)
+                    result = self.lama(np.array(img_pil), np.array(mask_pil), self.lama_config)
+                    cleaned_lama = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
 
                     # 2. Resize fix (LaMa padding issue)
                     if cleaned_lama.shape[:2] != (h, w):
