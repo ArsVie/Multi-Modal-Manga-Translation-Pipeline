@@ -20,6 +20,7 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 # App files
 COPY MangaTranslator.py .
 COPY server.py .
+COPY index.html .
 COPY font.ttf . 2>/dev/null || true
 
 # Models are mounted at runtime or downloaded

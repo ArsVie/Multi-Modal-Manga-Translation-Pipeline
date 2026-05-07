@@ -11,7 +11,8 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 # Import the translator — assumes MangaTranslator.py is in the same directory
 import sys
@@ -29,6 +30,22 @@ app = FastAPI(
     description="Upload a Japanese manga page, get an English translated page back.",
     version="2.0.0",
 )
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/", response_class=HTMLResponse)
+def frontend():
+    """Serve the web UI."""
+    html_path = Path(__file__).parent / "index.html"
+    if html_path.exists():
+        return html_path.read_text()
+    return "<h1>Manga Translator API</h1><p>POST /translate with an image file.</p>"
 
 # Load translator once at startup
 translator: MangaTranslator | None = None
