@@ -1,0 +1,11 @@
+ultralytics>=8.0.0
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+Pillow>=10.0.0
+torch>=2.1.0
+manga-ocr>=0.1.14
+langchain-ollama>=0.1.0
+langchain-core>=0.2.0
+pyphen>=0.13.0
+pykakasi>=2.3.0
+lama-cleaner>=0.31.0

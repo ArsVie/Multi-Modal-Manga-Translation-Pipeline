@@ -10,6 +10,7 @@ from ultralytics import YOLO
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from manga_ocr import MangaOcr
+from lama_cleaner.model.lama import LaMa as SimpleLama
 
 class MangaTranslator:
     def __init__(self, yolo_model_path='comic_yolov8m.pt', ollama_model="qwen2.5:7b",
@@ -46,6 +47,7 @@ class MangaTranslator:
         self.custom_translations = custom_translations or {}
 
         self.keep_honorifics = keep_honorifics
+        self.debug = debug
         self.honorifics = ['san', 'chan', 'kun', 'sama', 'senpai', 'sensei', 'dono', 'tan']
 
         # For romanization fallback
@@ -425,6 +427,7 @@ Description: {series_info.get('description', 'None')}
 
         chain = prompt | self.llm
 
+        max_retries = 3
         content = ""
         try:
             response = chain.invoke({"payload": json_string})
@@ -459,6 +462,7 @@ Description: {series_info.get('description', 'None')}
                 if entry['id'] in translation_map:
                     translation = translation_map[entry['id']]
 
+                    max_retries = 3
                     # Check if translation contains Japanese characters
                     if self._has_japanese_characters(translation):
                         print(f"    ⚠ Translation for {entry['id']} contains Japanese. Retrying (Max {max_retries})...")
@@ -516,7 +520,7 @@ Description: {series_info.get('description', 'None')}
 
 
 
-def clean_page(self, original_image, page_data, ellipse_padding=8, inpaint_radius=5):
+    def clean_page(self, original_image, page_data, ellipse_padding=8, inpaint_radius=5):
             """
             Strict Hybrid Cleaning:
             - text_bubble -> OpenCV Inpainting inside a shrunk Ellipse mask (Preserves tails)
