@@ -27,7 +27,7 @@ class MangaTranslator:
         self.font_path = font_path
 
         print("Loading LaMa Inpainting model...")
-        self.lama = SimpleLama()
+        self.lama = SimpleLama(device='cuda')
         self.lama_config = LamaConfig(
             ldm_steps=1,
             hd_strategy='Original',
