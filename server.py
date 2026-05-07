@@ -55,12 +55,20 @@ translator: MangaTranslator | None = None
 def load_models():
     """Initialize translation pipeline on server start."""
     global translator
+    print("Loading YOLO + LaMa + MangaOCR + Ollama client...")
     translator = MangaTranslator(
         yolo_model_path=os.getenv("YOLO_MODEL", "/tmp/manga-test-models/comic-speech-bubble-detector.pt"),
         ollama_model=os.getenv("OLLAMA_MODEL", "qwen3.5:9b"),
         font_path=os.getenv("FONT_PATH", "/tmp/manga-test-models/animeace2_reg.otf"),
         debug=False,
     )
+    # Warm up Ollama — trigger model load so first request is fast
+    print("Warming up Ollama (loading 6.6GB model, ~140s)...")
+    try:
+        translator.llm.invoke("Say 'ready'.")
+        print("Ollama warmup complete.")
+    except Exception as e:
+        print(f"Ollama warmup failed (translation will still work, first request will be slow): {e}")
 
 
 @app.post("/translate")
@@ -84,12 +92,6 @@ async def translate_page(image: UploadFile = File(...)):
     output_path = input_path + "_translated.jpg"
 
     try:
-        translator.detect_and_process(input_path, output_dir="/tmp/manga-api-crops", page_id="api")
-        # For single image, we need a simpler path than process_chapter
-        # Use detect + OCR + translate + typeset directly
-        from PIL import Image
-        import cv2
-
         img, data = translator.detect_and_process(
             input_path, output_dir="/tmp/manga-api-crops", page_id="single"
         )
