@@ -1,124 +1,215 @@
-"""FastAPI server for manga translation.
-Single endpoint: POST /translate with manga page image, returns translated page.
+"""FastAPI web app for the manga translation pipeline.
 
-Usage:
-    pip install fastapi uvicorn python-multipart
+Endpoints:
+    GET  /          -> the web UI (index.html)
+    GET  /status    -> readiness of the pipeline and the local LLM server
+    POST /translate -> upload manga pages, get translated images back (base64)
+
+Run:
     uvicorn server:app --host 0.0.0.0 --port 8000
 """
 
-import tempfile
+import base64
 import os
+import shutil
+import tempfile
+import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware
+import requests
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import HTMLResponse, JSONResponse
 
-# Import the translator — assumes MangaTranslator.py is in the same directory
-import sys
-sys.path.insert(0, os.path.dirname(__file__))
+from MangaTranslator import MangaTranslator
 
-try:
-    from MangaTranslator import MangaTranslator
-except ImportError:
-    # Fallback for different project layouts
-    sys.path.insert(0, '/tmp/ars-repos/Multi-Modal-Manga-Translation-Pipeline')
-    from MangaTranslator import MangaTranslator
+BASE_DIR = Path(__file__).resolve().parent
 
-app = FastAPI(
-    title="Manga Translator API",
-    description="Upload a Japanese manga page, get an English translated page back.",
-    version="2.0.0",
-)
+# Model assets. Override with environment variables if they live elsewhere.
+YOLO_MODEL = os.getenv("YOLO_MODEL", str(BASE_DIR / "comic-speech-bubble-detector.pt"))
+FONT_PATH = os.getenv("FONT_PATH", str(BASE_DIR / "animeace2_reg.ttf"))
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Local llama.cpp server (OpenAI-compatible API). Gemma 4 26B-A4B by default.
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:8110")
+LLM_MODEL = os.getenv("LLM_MODEL", "local")
+
+VALID_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+
+translator = None
+load_error = None
+pipeline_lock = threading.Lock()  # one translate request at a time
+
+
+def load_models():
+    """Load YOLO + LaMa + MangaOCR once at startup."""
+    global translator, load_error
+    try:
+        print(f"Loading models (YOLO={YOLO_MODEL}, font={FONT_PATH})...")
+        translator = MangaTranslator(
+            yolo_model_path=YOLO_MODEL,
+            llm_base_url=LLM_BASE_URL,
+            llm_model=LLM_MODEL,
+            font_path=FONT_PATH,
+            debug=False,
+        )
+        print("Models loaded. Ready for /translate requests.")
+    except Exception as exc:  # keep the server up; /translate reports the error
+        load_error = str(exc)
+        print(f"ERROR: could not load models: {exc}")
+        print("Hint: download comic-speech-bubble-detector.pt and a font into the")
+        print("project folder (see README), or set YOLO_MODEL / FONT_PATH.")
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    load_models()
+    yield
+
+
+app = FastAPI(title="Manga Translator", lifespan=lifespan)
+
+
+def _llm_state(base_url):
+    """'ready' when the LLM server has a model loaded, 'loading' while it
+    loads, 'unreachable' when nothing answers."""
+    try:
+        health = requests.get(f"{base_url}/health", timeout=3)
+        return "ready" if health.status_code == 200 else "loading"
+    except requests.RequestException:
+        return "unreachable"
 
 
 @app.get("/", response_class=HTMLResponse)
-def frontend():
+def index():
     """Serve the web UI."""
-    html_path = Path(__file__).parent / "index.html"
-    if html_path.exists():
-        return html_path.read_text()
-    return "<h1>Manga Translator API</h1><p>POST /translate with an image file.</p>"
-
-# Load translator once at startup
-translator: MangaTranslator | None = None
+    return (BASE_DIR / "index.html").read_text(encoding="utf-8")
 
 
-@app.on_event("startup")
-def load_models():
-    """Initialize translation pipeline on server start."""
-    global translator
-    print("Loading YOLO + LaMa + MangaOCR + Ollama client...")
-    translator = MangaTranslator(
-        yolo_model_path=os.getenv("YOLO_MODEL", "/tmp/manga-test-models/comic-speech-bubble-detector.pt"),
-        ollama_model=os.getenv("OLLAMA_MODEL", "qwen3.5:9b"),
-        font_path=os.getenv("FONT_PATH", "/tmp/manga-test-models/animeace2_reg.otf"),
-        debug=False,
-    )
-    # Warm up Ollama — trigger model load so first request is fast
-    print("Warming up Ollama (loading 6.6GB model, ~140s)...")
-    try:
-        translator.llm.invoke("Say 'ready'.")
-        print("Ollama warmup complete.")
-    except Exception as e:
-        print(f"Ollama warmup failed (translation will still work, first request will be slow): {e}")
+@app.get("/status")
+def status():
+    return {
+        "models_loaded": translator is not None,
+        "load_error": load_error,
+        "llm_base_url": LLM_BASE_URL,
+        "llm_state": _llm_state(LLM_BASE_URL),
+    }
+
+
+def _parse_custom_translations(raw):
+    """Parse 'jp=English' lines (one per line, '#' comments allowed)."""
+    custom = {}
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        jp, _, en = line.partition("=")
+        if jp.strip():
+            custom[jp.strip()] = en.strip()
+    return custom
+
+
+def _process(files, settings):
+    """Run the full pipeline on the uploaded pages. Blocking; runs in a thread."""
+    assert translator is not None  # the endpoint checks this before dispatching
+    with pipeline_lock:
+        translator.set_llm(base_url=settings["llm_base_url"], model=None)
+        translator.custom_translations = settings["custom_translations"]
+        translator.keep_honorifics = settings["keep_honorifics"]
+
+        in_dir = tempfile.mkdtemp(prefix="manga_in_")
+        out_dir = tempfile.mkdtemp(prefix="manga_out_")
+        try:
+            names = []
+            for name, content in files:
+                safe = os.path.basename(name) or f"page_{len(names) + 1}.jpg"
+                (Path(in_dir) / safe).write_bytes(content)
+                names.append(safe)
+
+            series_info = None
+            if settings["title"] or settings["tags"] or settings["description"]:
+                series_info = {
+                    "title": settings["title"] or "Unknown",
+                    "tags": settings["tags"],
+                    "description": settings["description"],
+                }
+
+            translator.process_chapter(
+                input_folder=in_dir,
+                output_folder=out_dir,
+                series_info=series_info,
+                batch_size=settings["batch_size"],
+                conf_threshold=settings["conf_threshold"],
+                save_comparisons=settings["save_comparisons"],
+            )
+
+            pages = []
+            for name in names:
+                out_path = Path(out_dir) / name
+                comparison_path = Path(out_dir) / f"{Path(name).stem}_comparison.png"
+                page = {"filename": name, "translated_b64": None, "comparison_b64": None}
+                if out_path.exists():
+                    page["translated_b64"] = base64.b64encode(out_path.read_bytes()).decode()
+                else:
+                    page["error"] = "translation failed — check the server logs"
+                if comparison_path.exists():
+                    page["comparison_b64"] = base64.b64encode(comparison_path.read_bytes()).decode()
+                pages.append(page)
+            return pages
+        finally:
+            shutil.rmtree(in_dir, ignore_errors=True)
+            shutil.rmtree(out_dir, ignore_errors=True)
 
 
 @app.post("/translate")
-async def translate_page(image: UploadFile = File(...)):
-    """Translate a single manga page.
-
-    Accepts JPEG/PNG upload, returns the translated image.
-    """
+async def translate(
+    files: list[UploadFile] = File(...),
+    title: str = Form(""),
+    tags: str = Form(""),
+    description: str = Form(""),
+    custom_translations: str = Form(""),
+    keep_honorifics: bool = Form(False),
+    conf_threshold: float = Form(0.15),
+    batch_size: int = Form(4),
+    save_comparisons: bool = Form(True),
+    llm_base_url: str = Form(""),
+):
     if translator is None:
-        raise HTTPException(503, "Models still loading, retry in a moment")
+        raise HTTPException(503, f"Models are not loaded. {load_error or 'Check the server logs.'}")
 
-    if image.content_type not in ("image/jpeg", "image/png"):
-        raise HTTPException(400, "Only JPEG and PNG images supported")
+    if not files:
+        raise HTTPException(400, "No files uploaded")
 
-    # Save uploaded file to temp location
-    suffix = Path(image.filename).suffix if image.filename else ".jpg"
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp_in:
-        tmp_in.write(await image.read())
-        input_path = tmp_in.name
+    for f in files:
+        if Path(f.filename or "").suffix.lower() not in VALID_EXTENSIONS:
+            raise HTTPException(400, f"Unsupported file type: {f.filename} (use PNG/JPG/WEBP/BMP)")
 
-    output_path = input_path + "_translated.jpg"
+    base_url = (llm_base_url or LLM_BASE_URL).rstrip("/")
+    state = _llm_state(base_url)
+    if state != "ready":
+        detail = {
+            "unreachable": f"LLM server at {base_url} is not reachable. Start it first "
+                           f"(see README: 'Local LLM server').",
+            "loading": f"LLM server at {base_url} is still loading its model. Try again in a minute.",
+        }.get(state, state)
+        raise HTTPException(503, detail)
+
+    uploads = [(f.filename, await f.read()) for f in files]
+    settings = {
+        "title": title.strip(),
+        "tags": tags.strip(),
+        "description": description.strip(),
+        "custom_translations": _parse_custom_translations(custom_translations),
+        "keep_honorifics": keep_honorifics,
+        "conf_threshold": conf_threshold,
+        "batch_size": batch_size,
+        "save_comparisons": save_comparisons,
+        "llm_base_url": base_url,
+    }
 
     try:
-        img, data = translator.detect_and_process(
-            input_path, output_dir="/tmp/manga-api-crops", page_id="single"
-        )
-        if data:
-            data = translator.run_ocr(data)
-            data = translator.translate_batch(data)
-            translator.typeset(img, data, output_path)
+        pages = await run_in_threadpool(_process, uploads, settings)
+    except Exception as exc:
+        raise HTTPException(500, f"Processing failed: {exc}")
 
-        return FileResponse(
-            output_path,
-            media_type="image/jpeg",
-            filename=f"translated_{image.filename or 'page.jpg'}",
-        )
-
-    except Exception as e:
-        raise HTTPException(500, f"Translation failed: {e}")
-
-    finally:
-        # Cleanup temp files
-        for p in (input_path, output_path):
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
-
-
-@app.get("/health")
-def health():
-    """Health check endpoint."""
-    return {"status": "ready" if translator else "loading", "models_loaded": translator is not None}
+    return JSONResponse({"pages": pages})

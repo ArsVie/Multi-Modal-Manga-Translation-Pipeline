@@ -3,149 +3,387 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Manga Translator</title>
+<title>Manga Translation</title>
+<!-- Theme: 4chan "Tomorrow" (colors taken from s.4cdn.org/css/tomorrow.css) -->
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #eee; min-height: 100vh; }
-  header { text-align: center; padding: 2rem 1rem 1rem; }
-  header h1 { font-size: 1.8rem; color: #e94560; }
-  header p { color: #888; margin-top: .3rem; }
+  * { box-sizing: border-box; }
+  body {
+    background: #1d1f21 none; color: #c5c8c6;
+    font-family: arial, helvetica, sans-serif; font-size: 10pt;
+    margin: 5px 8px 30px; padding-left: 5px; padding-right: 5px;
+  }
+  a, a:visited { color: #81a2be; text-decoration: none; }
+  a:hover { color: #5F89AC; }
+  hr { border: none; border-top: 1px solid #282a2e; height: 0; }
+
+  #nav { font-size: 9pt; }
+  #nav a { padding: 0 2px; }
+  #nav .right { float: right; }
+
+  .boardBanner { text-align: center; clear: both; margin: 10px 0 6px; }
+  .boardTitle { font-family: Tahoma, sans-serif; font-size: 28px; font-weight: bold;
+                letter-spacing: -2px; }
+  .boardSubtitle { font-size: x-small; }
+
+  .container { max-width: 1000px; margin: 0 auto; }
+
+  fieldset.postform, fieldset.adv {
+    background: #282a2e; border: 1px solid #282a2e; padding: 8px 10px; margin: 12px 0;
+  }
+  fieldset.adv { margin: 10px 0 6px; }
+  fieldset.postform > legend, fieldset.adv > legend { color: #b294bb; font-weight: bold; padding: 0 4px; }
+
+  input[type=text], input[type=number], textarea, select {
+    background: #1d1f21; color: #c5c8c6; border: 1px solid #3a3d42;
+    padding: 3px 4px; font-family: inherit; font-size: 10pt;
+  }
+  textarea { width: 100%; resize: vertical; }
 
   .dropzone {
-    max-width: 700px; margin: 1rem auto; padding: 3rem 1rem;
-    border: 2px dashed #444; border-radius: 12px; text-align: center;
-    cursor: pointer; transition: border-color .2s;
+    border: 2px dashed #3a3d42; padding: 18px; text-align: center;
+    color: #8abeb7; cursor: pointer; margin-bottom: 6px;
   }
-  .dropzone:hover, .dropzone.drag { border-color: #e94560; }
-  .dropzone p { color: #888; font-size: .95rem; }
-  .dropzone .icon { font-size: 2.5rem; margin-bottom: .5rem; }
-
-  .results { max-width: 900px; margin: 1rem auto; padding: 0 1rem; }
-  .card {
-    display: flex; gap: 1rem; background: #16213e; border-radius: 10px;
-    padding: 1rem; margin-bottom: .75rem; align-items: center;
-  }
-  .card img { max-height: 200px; border-radius: 6px; object-fit: contain; background: #0f0f23; }
-  .card .info { flex: 1; min-width: 0; }
-  .card .info .name { font-weight: 600; margin-bottom: .3rem; font-size: .9rem; word-break: break-all; }
-  .card .info .status { font-size: .8rem; }
-  .card .info .status.pending { color: #888; }
-  .card .info .status.processing { color: #f0c040; }
-  .card .info .status.done { color: #4ecca3; }
-  .card .info .status.error { color: #e94560; }
-  .card .actions { display: flex; flex-direction: column; gap: .4rem; }
-  .card .actions a, .card .actions button {
-    background: #e94560; color: #fff; border: none; padding: .4rem .8rem;
-    border-radius: 6px; cursor: pointer; font-size: .8rem; text-decoration: none; text-align: center;
-  }
-  .card .actions a:hover, .card .actions button:hover { background: #c73650; }
-
-  .hidden { display: none; }
+  .dropzone:hover, .dropzone.drag { border-color: #81a2be; color: #81a2be; }
   #file-input { display: none; }
+
+  .advgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px; margin-top: 8px; }
+  .advgrid label { display: flex; flex-direction: column; gap: 2px; font-size: 9.5pt; }
+  .advgrid label.check { flex-direction: row; align-items: center; gap: 6px; }
+  .advgrid .full { grid-column: 1 / -1; }
+
+  button {
+    background: #3a3d42; color: #c5c8c6; border: 1px solid #111;
+    padding: 4px 14px; cursor: pointer; font-family: inherit; font-size: 10pt;
+  }
+  button:hover:enabled { background: #81a2be; color: #1d1f21; }
+  button:disabled { opacity: .5; cursor: default; }
+
+  .filelist { margin: 8px 0; font-size: 9.5pt; }
+  .frow { padding: 2px 0; }
+
+  .st { font-weight: bold; }
+  .st.queued { color: #585858; }
+  .st.processing { color: #f0c674; }
+  .st.done { color: #b5bd68; }
+  .st.error { color: #cc6666; }
+  .err { color: #cc6666; }
+  .note { color: #8abeb7; font-size: 9pt; }
+
+  #results { margin-top: 14px; }
+  .reply { background: #282a2e; border: 1px solid #282a2e;
+           padding: 4px 8px 8px; margin: 8px 0; display: table; }
+  .postInfo { font-size: 10pt; margin-bottom: 4px; }
+  .postInfo .name { font-weight: bold; }
+  .postInfo .subject { color: #b294bb; font-weight: bold; }
+  .fileText { font-size: 9pt; margin: 2px 0 4px; }
+  .fileText a { text-decoration: underline; }
+  .reply img.result { max-width: 100%; display: block; margin: 4px 0; }
+  .dl { margin-top: 6px; font-size: 9pt; }
+  .dl a { margin-right: 12px; text-decoration: underline; }
 </style>
 </head>
 <body>
 
-<header>
-  <h1>Manga Translator</h1>
-  <p>Upload Japanese manga pages — get English translations</p>
-</header>
-
-<div class="dropzone" id="dropzone">
-  <div class="icon">+</div>
-  <p>Drop images here or click to browse</p>
-  <p style="font-size:.8rem;margin-top:.4rem">JPEG, PNG — multiple files supported</p>
+<div id="nav">
+  [ <a href="https://boards.4chan.org/a/">a</a> /
+    <a href="https://boards.4chan.org/c/">c</a> /
+    <a href="https://boards.4chan.org/g/">g</a> /
+    <a href="https://boards.4chan.org/gd/">gd</a> /
+    <a href="https://boards.4chan.org/jp/">jp</a> /
+    <a href="https://boards.4chan.org/m/">m</a> /
+    <a href="https://boards.4chan.org/o/">o</a> /
+    <a href="https://boards.4chan.org/p/">p</a> /
+    <a href="https://boards.4chan.org/v/">v</a> /
+    <a href="https://boards.4chan.org/vg/">vg</a> /
+    <a href="https://boards.4chan.org/vr/">vr</a> /
+    <a href="https://boards.4chan.org/w/">w</a> /
+    <a href="https://boards.4chan.org/wg/">wg</a> ]
+  <span class="right"><a href="https://github.com/ArsVie/Multi-Modal-Manga-Translation-Pipeline">GitHub</a></span>
 </div>
 
-<input type="file" id="file-input" accept="image/jpeg,image/png" multiple>
+<div class="boardBanner">
+  <div class="boardTitle">Manga Translation</div>
+  <div class="boardSubtitle">Upload Japanese pages — get English pages back. Powered by local models.</div>
+</div>
 
-<div class="results hidden" id="results"></div>
+<hr>
+
+<div class="container">
+
+  <fieldset class="postform">
+    <legend>Start a translation</legend>
+
+    <div class="dropzone" id="dropzone">Drop pages here or click to browse — PNG / JPG / WEBP, multiple allowed</div>
+    <input type="file" id="file-input" multiple accept="image/jpeg,image/png,image/webp,image/bmp">
+    <div class="filelist" id="filelist"></div>
+
+    <fieldset class="adv">
+      <legend>Advanced settings</legend>
+      <div class="advgrid">
+        <label>LLM server
+          <select id="llm-preset">
+            <option value="http://localhost:8110">Gemma 4 26B-A4B (:8110)</option>
+            <option value="http://localhost:8080">Qwen3.6 35B-A3B (:8080)</option>
+            <option value="http://localhost:8111">Qwen3.6 35B-A3B MTP (:8111)</option>
+            <option value="custom">Custom…</option>
+          </select>
+        </label>
+        <label>LLM base URL <input type="text" id="llm-url" value="http://localhost:8110"></label>
+        <label>Series title <input type="text" id="series-title" placeholder="e.g. Sekai Saikou no Ansatsusha"></label>
+        <label>Tags <input type="text" id="series-tags" placeholder="Action, Fantasy, Comedy…"></label>
+        <label class="full">Description
+          <textarea id="series-desc" rows="3" placeholder="One-paragraph plot summary — helps tone and character voices"></textarea>
+        </label>
+        <label class="full">Custom names map (one <code>jp=English</code> per line)
+          <textarea id="custom-map" rows="4" placeholder="ルーグ=Lugh&#10;トウアハーデ=Tuatha Dé&#10;ディア=Dia"></textarea>
+        </label>
+        <label>Batch size (pages translated together)
+          <input type="number" id="batch-size" value="4" min="1" max="16">
+        </label>
+        <label>Detection confidence (lower = more bubbles)
+          <input type="number" id="conf" value="0.15" min="0.05" max="0.9" step="0.05">
+        </label>
+        <label class="check"><input type="checkbox" id="keep-honorifics"> Keep honorifics (-san, -chan…)</label>
+        <label class="check"><input type="checkbox" id="save-comparisons" checked> Show comparison sheet (Original / Translated / Translated + LaMa)</label>
+      </div>
+    </fieldset>
+
+    <div style="margin-top: 6px;">
+      <button id="translate-btn" disabled>Translate</button>
+      <span id="global-status" class="note"></span>
+    </div>
+  </fieldset>
+
+  <div id="results"></div>
+</div>
 
 <script>
-const API = '/translate';
-const dropzone = document.getElementById('dropzone');
-const fileInput = document.getElementById('file-input');
-const results = document.getElementById('results');
+(function () {
+  var files = [];
+  var $ = function (id) { return document.getElementById(id); };
+  var fileInput = $("file-input"), fileList = $("filelist"), button = $("translate-btn");
+  var globalStatus = $("global-status"), results = $("results"), dropzone = $("dropzone");
+  var timer = null;
+  var busy = false;
 
-dropzone.addEventListener('click', () => fileInput.click());
-dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('drag'); });
-dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag'));
-dropzone.addEventListener('drop', e => {
-  e.preventDefault();
-  dropzone.classList.remove('drag');
-  handleFiles(e.dataTransfer.files);
-});
-fileInput.addEventListener('change', () => handleFiles(fileInput.files));
+  // ---------- status banner ----------
+  function refreshStatus() {
+    if (busy) return;
+    fetch("/status").then(function (r) { return r.json(); }).then(function (s) {
+      var parts = [];
+      parts.push(s.models_loaded ? "models loaded" : "models NOT loaded" + (s.load_error ? " — " + s.load_error : ""));
+      parts.push("LLM (" + s.llm_base_url + "): " + s.llm_state);
+      globalStatus.textContent = "[" + parts.join(" | ") + "]";
+      globalStatus.style.color = (s.models_loaded && s.llm_state === "ready") ? "#b5bd68" : "#f0c674";
+    }).catch(function () {
+      globalStatus.textContent = "[server unreachable]";
+      globalStatus.style.color = "#cc6666";
+    });
+  }
+  refreshStatus();
+  setInterval(refreshStatus, 15000);
 
-function handleFiles(files) {
-  if (!files.length) return;
-  results.classList.remove('hidden');
-  Array.from(files).forEach(file => addCard(file));
-}
+  // ---------- file selection ----------
+  function renderFiles() {
+    fileList.innerHTML = "";
+    files.forEach(function (f, i) {
+      var row = document.createElement("div");
+      row.className = "frow";
+      var st = document.createElement("span");
+      st.className = "st queued";
+      st.id = "st-" + i;
+      row.appendChild(st);
+      fileList.appendChild(row);
+      setStatus(i, "queued", "queued");
+    });
+    button.disabled = files.length === 0;
+  }
 
-function addCard(file) {
-  const card = document.createElement('div');
-  card.className = 'card';
+  function addFiles(list) {
+    files = files.concat(Array.prototype.slice.call(list));
+    renderFiles();
+  }
 
-  const img = document.createElement('img');
-  img.src = URL.createObjectURL(file);
-  img.alt = file.name;
+  dropzone.addEventListener("click", function () { fileInput.click(); });
+  dropzone.addEventListener("dragover", function (e) { e.preventDefault(); dropzone.classList.add("drag"); });
+  dropzone.addEventListener("dragleave", function () { dropzone.classList.remove("drag"); });
+  dropzone.addEventListener("drop", function (e) {
+    e.preventDefault();
+    dropzone.classList.remove("drag");
+    if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+  });
+  fileInput.addEventListener("change", function () { addFiles(fileInput.files); fileInput.value = ""; });
 
-  const info = document.createElement('div');
-  info.className = 'info';
-  info.innerHTML = `<div class="name">${file.name}</div><div class="status pending">Queued</div>`;
+  function setStatus(i, cls, text) {
+    var st = $("st-" + i);
+    if (!st || !files[i]) return;
+    var f = files[i];
+    st.className = "st " + cls;
+    st.textContent = "\u25A0 " + (text || "") + " " + f.name + " (" + (f.size / 1024).toFixed(0) + " KB)";
+  }
 
-  const actions = document.createElement('div');
-  actions.className = 'actions';
+  // ---------- advanced settings persistence ----------
+  var fields = ["llm-preset", "llm-url", "series-title", "series-tags", "series-desc",
+                "custom-map", "batch-size", "conf", "keep-honorifics", "save-comparisons"];
+  function saveSettings() {
+    var data = {};
+    fields.forEach(function (id) {
+      var el = $(id);
+      data[id] = el.type === "checkbox" ? el.checked : el.value;
+    });
+    localStorage.setItem("manga-settings", JSON.stringify(data));
+  }
+  function loadSettings() {
+    var raw = localStorage.getItem("manga-settings");
+    if (!raw) return;
+    try {
+      var data = JSON.parse(raw);
+      fields.forEach(function (id) {
+        var el = $(id);
+        if (!(id in data)) return;
+        if (el.type === "checkbox") el.checked = data[id]; else el.value = data[id];
+      });
+    } catch (e) { /* ignore corrupt settings */ }
+  }
+  loadSettings();
+  fields.forEach(function (id) { $(id).addEventListener("change", saveSettings); });
 
-  card.append(img, info, actions);
-  results.prepend(card);
+  $("llm-preset").addEventListener("change", function () {
+    if (this.value !== "custom") $("llm-url").value = this.value;
+    saveSettings();
+  });
 
-  translateImage(file, info, actions, img);
-}
+  // ---------- translate ----------
+  function fmtTime(sec) {
+    var m = Math.floor(sec / 60), s = sec % 60;
+    return m + ":" + (s < 10 ? "0" : "") + s;
+  }
 
-async function translateImage(file, infoEl, actionsEl, previewImg) {
-  const statusEl = infoEl.querySelector('.status');
-  statusEl.textContent = 'Translating...';
-  statusEl.className = 'status processing';
+  function postNumber(i) {
+    return 13000000 + (Math.floor(Date.now() / 100000) % 800000) + i;
+  }
 
-  const form = new FormData();
-  form.append('image', file);
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
 
-  try {
-    const res = await fetch(API, { method: 'POST', body: form });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail || 'Translation failed');
+  function makePost(page, index) {
+    var post = document.createElement("div");
+    post.className = "reply";
+
+    var info = document.createElement("div");
+    info.className = "postInfo";
+    var now = new Date();
+    var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+    info.innerHTML = '<span class="name">Translator</span>' +
+      '  ' + pad(now.getMonth() + 1) + "/" + pad(now.getDate()) + "/" + (now.getFullYear() % 100) + ' ' +
+      '<span class="subject">' + escapeHtml(page.filename) + '</span> ' +
+      '<span class="postNum">No.' + postNumber(index) + '</span>';
+    post.appendChild(info);
+
+    if (page.error) {
+      var err = document.createElement("div");
+      err.className = "err";
+      err.textContent = page.error;
+      post.appendChild(err);
+      return post;
     }
 
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
+    var img = document.createElement("img");
+    img.className = "result";
+    img.alt = page.filename;
+    img.src = page.comparison_b64
+      ? "data:image/png;base64," + page.comparison_b64
+      : "data:image/jpeg;base64," + page.translated_b64;
+    post.appendChild(img);
 
-    previewImg.src = url;
-    statusEl.textContent = 'Done ✓';
-    statusEl.className = 'status done';
+    var fileLine = document.createElement("div");
+    fileLine.className = "fileText";
+    fileLine.textContent = "File: " + page.filename + " (translated" +
+      (page.comparison_b64 ? " + comparison sheet" : "") + ")";
+    post.appendChild(fileLine);
 
-    const downloadLink = document.createElement('a');
-    downloadLink.href = url;
-    downloadLink.download = 'translated_' + file.name;
-    downloadLink.textContent = '⬇ Download';
-    actionsEl.appendChild(downloadLink);
-
-  } catch (e) {
-    statusEl.textContent = 'Error: ' + e.message;
-    statusEl.className = 'status error';
-
-    const retryBtn = document.createElement('button');
-    retryBtn.textContent = 'Retry';
-    retryBtn.onclick = () => {
-      actionsEl.innerHTML = '';
-      translateImage(file, infoEl, actionsEl, previewImg);
-    };
-    actionsEl.appendChild(retryBtn);
+    var dl = document.createElement("div");
+    dl.className = "dl";
+    var links = [];
+    if (page.translated_b64) {
+      links.push(['data:image/jpeg;base64,' + page.translated_b64, "translated_" + page.filename]);
+    }
+    if (page.comparison_b64) {
+      links.push(['data:image/png;base64,' + page.comparison_b64,
+                  page.filename.replace(/\.[^.]+$/, "") + "_comparison.png"]);
+    }
+    links.forEach(function (l) {
+      var a = document.createElement("a");
+      a.href = l[0];
+      a.download = l[1];
+      a.textContent = "Download " + l[1];
+      a.className = "dlink";
+      dl.appendChild(a);
+    });
+    post.appendChild(dl);
+    return post;
   }
-}
-</script>
 
+  button.addEventListener("click", function () {
+    if (!files.length) return;
+    var fd = new FormData();
+    files.forEach(function (f) { fd.append("files", f, f.name); });
+    fd.append("title", $("series-title").value);
+    fd.append("tags", $("series-tags").value);
+    fd.append("description", $("series-desc").value);
+    fd.append("custom_translations", $("custom-map").value);
+    fd.append("keep_honorifics", $("keep-honorifics").checked ? "true" : "false");
+    fd.append("conf_threshold", $("conf").value);
+    fd.append("batch_size", $("batch-size").value);
+    fd.append("save_comparisons", $("save-comparisons").checked ? "true" : "false");
+    fd.append("llm_base_url", $("llm-url").value.trim());
+
+    files.forEach(function (f, i) { setStatus(i, "processing", "processing…"); });
+    button.disabled = true;
+    busy = true;
+    results.innerHTML = "";
+
+    var started = Date.now();
+    globalStatus.textContent = "Translating " + files.length + " page(s) — 0:00 elapsed";
+    globalStatus.style.color = "#f0c674";
+    timer = setInterval(function () {
+      globalStatus.textContent = "Translating " + files.length + " page(s) — " +
+        fmtTime(Math.floor((Date.now() - started) / 1000)) + " elapsed";
+    }, 1000);
+
+    fetch("/translate", { method: "POST", body: fd })
+      .then(function (r) {
+        return r.json().then(function (body) {
+          if (!r.ok) throw new Error(body.detail || ("HTTP " + r.status));
+          return body;
+        });
+      })
+      .then(function (body) {
+        clearInterval(timer);
+        body.pages.forEach(function (page, i) {
+          setStatus(i, page.error ? "error" : "done", page.error ? "error" : "done");
+          results.appendChild(makePost(page, i));
+        });
+        var ok = body.pages.filter(function (p) { return !p.error; }).length;
+        globalStatus.textContent = "Done — " + ok + "/" + body.pages.length + " page(s) translated in " +
+          fmtTime(Math.floor((Date.now() - started) / 1000)) + ".";
+        globalStatus.style.color = "#b5bd68";
+        button.disabled = false;
+        busy = false;
+      })
+      .catch(function (err) {
+        clearInterval(timer);
+        files.forEach(function (f, i) { setStatus(i, "error", "failed"); });
+        globalStatus.textContent = "Error: " + err.message;
+        globalStatus.style.color = "#cc6666";
+        button.disabled = false;
+        busy = false;
+      });
+  });
+})();
+</script>
 </body>
 </html>
