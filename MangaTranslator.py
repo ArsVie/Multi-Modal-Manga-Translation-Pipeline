@@ -12,6 +12,11 @@ from manga_ocr import MangaOcr
 from simple_lama_inpainting import SimpleLama
 
 class MangaTranslator:
+    # Below this fraction of "edge ink" a text_bubble region is treated as a
+    # rectangular text box (title cards etc.) and cleaned with a full-region
+    # mask instead of an ellipse mask (an ellipse leaves the corners behind).
+    BOX_EDGE_THRESHOLD = 0.05
+
     def __init__(self, yolo_model_path='comic-speech-bubble-detector.pt',
                  llm_base_url="http://localhost:8110", llm_model="local",
                  font_path="animeace2_reg.ttf", custom_translations=None,
@@ -128,42 +133,56 @@ class MangaTranslator:
         sorted_bubbles.extend(current_row)
         return sorted_bubbles
 
-    def _wrap_text_dynamic(self, text, font, max_width):
-        words = text.split()
+    def _wrap_text_dynamic(self, text, font, max_width, allow_hard_break=True):
+        """Wrap text to `max_width`, hyphenating words that do not fit.
+
+        Splits use pyphen syllables, picking the longest prefix that fits a
+        line. Returns None when a word would need a hard (non-syllable) break
+        and `allow_hard_break` is False - callers use that to prefer a smaller
+        font over ugly breaks.
+        """
         lines = []
-        current_line = []
-        current_width = 0
-        space_width = font.getlength(" ")
+        current = ""
 
-        for word in words:
-            word_width = font.getlength(word)
-            potential_width = current_width + word_width + (space_width if current_line else 0)
+        def fits(s):
+            return font.getlength(s) <= max_width
 
-            if potential_width <= max_width:
-                current_line.append(word)
-                current_width = potential_width
-            else:
-                splits = list(self.dic.iterate(word))
-                found_split = False
-                for start, end in reversed(splits):
-                    chunk = start + "-"
-                    chunk_width = font.getlength(chunk)
-                    if current_width + chunk_width + (space_width if current_line else 0) <= max_width:
-                        current_line.append(chunk)
-                        lines.append(" ".join(current_line))
-                        current_line = [end]
-                        current_width = font.getlength(end)
-                        found_split = True
-                        break
+        for word in text.split():
+            candidate = (current + " " + word).strip()
+            if fits(candidate):
+                current = candidate
+                continue
+            if current:
+                lines.append(current)
+                current = ""
 
-                if not found_split:
-                    if current_line:
-                        lines.append(" ".join(current_line))
-                    current_line = [word]
-                    current_width = word_width
+            if fits(word):
+                current = word
+                continue
 
-        if current_line:
-            lines.append(" ".join(current_line))
+            # The word does not fit on a line of its own: split it up.
+            pieces = []
+            rest = word
+            while not fits(rest):
+                splits = [(a, b) for a, b in self.dic.iterate(rest) if fits(a + "-")]
+                if splits:
+                    start, end = max(splits, key=lambda p: len(p[0]))
+                    pieces.append(start + "-")
+                    rest = end
+                else:
+                    if not allow_hard_break:
+                        return None
+                    cut = 1
+                    while cut < len(rest) - 1 and fits(rest[:cut + 1] + "-"):
+                        cut += 1
+                    pieces.append(rest[:cut] + "-")
+                    rest = rest[cut:]
+            pieces.append(rest)
+            lines.extend(pieces[:-1])
+            current = pieces[-1]
+
+        if current:
+            lines.append(current)
         return "\n".join(lines)
 
     def _smart_clean_bubble(self, img, bbox):
@@ -267,47 +286,65 @@ class MangaTranslator:
         # Draw main text
         draw.multiline_text(position, text, fill=text_color, font=font, **kwargs)
 
+    def _sanitize_for_font(self, text):
+        """Replace punctuation the lettering font lacks (Anime Ace draws a
+        missing-glyph box for em dashes and smart quotes)."""
+        replacements = {
+            "\u2014": "--",  # em dash
+            "\u2013": "-",   # en dash
+            "\u2015": "--",  # horizontal bar
+            "\u2026": "...", # ellipsis
+            "\u201c": '"', "\u201d": '"', "\u301d": '"', "\u301e": '"',
+            "\u2018": "'", "\u2019": "'",
+        }
+        for bad, good in replacements.items():
+            text = text.replace(bad, good)
+        return text
+
     def _calculate_optimal_font_size(self, text, bbox, min_size=12, max_size=36):
-            x1, y1, x2, y2 = bbox
-            box_width = x2 - x1
-            box_height = y2 - y1
+        x1, y1, x2, y2 = bbox
+        box_width = x2 - x1
+        box_height = y2 - y1
+        text = self._sanitize_for_font(text)
 
-            # --- NEW LOGIC: DETECT VERTICAL BUBBLES ---
-            # If height is 1.5x bigger than width, it's a vertical speech bubble.
-            is_vertical = box_height > (box_width * 1.5)
+        # Tall regions = vertical text turned sideways. English fits a tall
+        # column badly with the default cap, so raise the size cap and wrap to
+        # nearly the full width: bigger type fills the height instead of
+        # pooling in a narrow strip.
+        is_vertical = box_height > (box_width * 1.5)
+        if is_vertical:
+            max_size = max(max_size, min(96, int(max(box_width, box_height) / 3)))
+            target_width_ratio = 0.95
+        else:
+            target_width_ratio = 0.9
 
-            # If vertical, force text to use only 60% of width (makes a column)
-            # If horizontal, use 90% of width (standard)
-            target_width_ratio = 0.6 if is_vertical else 0.9
+        def try_wrap(size, allow_hard_break):
+            font = self._get_font(size)
+            wrapped = self._wrap_text_dynamic(
+                text, font, int(box_width * target_width_ratio),
+                allow_hard_break=allow_hard_break,
+            )
+            if wrapped is None:
+                return None
+            temp_draw = ImageDraw.Draw(Image.new('RGB', (1, 1)))
+            left, top, right, bottom = temp_draw.multiline_textbbox(
+                (0, 0), wrapped, font=font, align="center"
+            )
+            if (bottom - top) <= (box_height - 8) and (right - left) <= (box_width - 4):
+                return wrapped
+            return None
 
-            # Start with max size and reduce until text fits
+        # Prefer the largest size without hard breaks; allow them as a fallback
+        for allow_hard_break in (False, True):
             for size in range(max_size, min_size - 1, -1):
-                font = self._get_font(size)
+                wrapped = try_wrap(size, allow_hard_break)
+                if wrapped is not None:
+                    return size, wrapped
 
-                # Use the calculated target width
-                max_line_width = int(box_width * target_width_ratio)
-                wrapped = self._wrap_text_dynamic(text, font, max_line_width)
-
-                # Measure resulting text block
-                temp_draw = ImageDraw.Draw(Image.new('RGB', (1, 1)))
-                left, top, right, bottom = temp_draw.multiline_textbbox(
-                    (0, 0), wrapped, font=font, align="center"
-                )
-                text_width = right - left
-                text_height = bottom - top
-
-                # Check fit (Height is the main constraint)
-                if text_height < (box_height - 10):
-                    # Secondary check: If vertical, ensure we didn't accidentally
-                    # make it too wide (overflowing the sides)
-                    if text_width < (box_width - 4):
-                        return size, wrapped
-
-            # Fallback: Minimum size
-            font = self._get_font(min_size)
-            max_line_width = int(box_width * target_width_ratio)
-            wrapped = self._wrap_text_dynamic(text, font, max_line_width)
-            return min_size, wrapped
+        # Fallback: minimum size
+        font = self._get_font(min_size)
+        wrapped = self._wrap_text_dynamic(text, font, int(box_width * target_width_ratio))
+        return min_size, wrapped
 
     def _has_japanese_characters(self, text):
         """Check if text contains Japanese characters"""
@@ -341,15 +378,78 @@ class MangaTranslator:
             text = text.replace(jp_term, en_term)
         return text
 
-    def detect_and_process(self, image_path, output_dir="crops", page_id="", conf_threshold=0.15):
+    @staticmethod
+    def _overlap_ratio(box_a, box_b):
+        """Intersection over the smaller area of two boxes."""
+        ix = max(0, min(box_a[2], box_b[2]) - max(box_a[0], box_b[0]))
+        iy = max(0, min(box_a[3], box_b[3]) - max(box_a[1], box_b[1]))
+        inter = ix * iy
+        area_a = max(0, box_a[2] - box_a[0]) * max(0, box_a[3] - box_a[1])
+        area_b = max(0, box_b[2] - box_b[0]) * max(0, box_b[3] - box_b[1])
+        smaller = min(area_a, area_b)
+        return inter / smaller if smaller else 0.0
+
+    def _merge_duplicate_detections(self, detections, overlap_thresh=0.6):
+        """Drop duplicate detections of the same text block.
+
+        The model can fire both heads (text_bubble and text_free) or twice on
+        one region, and labels flicker between runs. Overlapping boxes merge
+        into the larger one; a merged pair containing a text_free detection is
+        cleaned as free text so the block is OCR'd, translated and drawn once.
+        """
+        def area(box):
+            return max(0, box[2] - box[0]) * max(0, box[3] - box[1])
+
+        kept = []
+        for det in sorted(detections, key=lambda d: area(d['bbox']), reverse=True):
+            duplicate = next(
+                (k for k in kept
+                 if self._overlap_ratio(det['bbox'], k['bbox']) > overlap_thresh),
+                None,
+            )
+            if duplicate is None:
+                kept.append(det)
+            elif det['label'] == 'text_free':
+                # Free text wins: LaMa cleans the whole block (incl. corners)
+                duplicate['label'] = 'text_free'
+        return kept
+
+    def _edge_ink_ratio(self, image, bbox, band=5):
+        """Fraction of dark ink pixels in the outer band of a region.
+
+        High = an outline (bubble border, panel line) runs along the crop edge.
+        Near zero = clean text area (free text or a boxed title).
+        """
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        h, w = image.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        crop = image[y1:y2, x1:x2]
+        if crop.size == 0:
+            return 0.0
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        _, ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        ink = ink > 0
+        ch, cw = ink.shape
+        band = max(1, min(band, ch // 4, cw // 4))
+        return float(max(
+            ink[:band, :].mean(),
+            ink[-band:, :].mean(),
+            ink[:, :band].mean(),
+            ink[:, -band:].mean(),
+        ))
+
+    def detect_and_process(self, image_path, output_dir="crops", page_id="",
+                           conf_threshold=0.15, imgsz=640):
             image = cv2.imread(image_path)
             if image is None: raise ValueError(f"Not found: {image_path}")
 
             # 1. Run Prediction
-            results = self.yolo_model.predict(source=image, conf=conf_threshold, save=False, verbose=False)
-            
+            results = self.yolo_model.predict(source=image, conf=conf_threshold,
+                                              imgsz=imgsz, save=False, verbose=False)
+
             # Get the class names dictionary (e.g., {0: 'text', 1: 'bubble'})
-            class_names = results[0].names 
+            class_names = results[0].names
 
             # 2. Extract Boxes AND Classes
             detections = []
@@ -357,14 +457,29 @@ class MangaTranslator:
                 xyxy = list(map(int, box.xyxy[0].tolist()))
                 cls_id = int(box.cls[0])
                 label = class_names[cls_id] # e.g., "text" or "bubble" or "face"
-                
+
                 # Filter: We only care about text/bubbles, not faces/bodies if your model detects them
-                if label in ['face', 'body']: continue 
-                
+                if label in ['face', 'body']: continue
+
                 detections.append({
                     "bbox": xyxy,
                     "label": label
                 })
+
+            # Merge duplicate detections of the same text block
+            detections = self._merge_duplicate_detections(detections)
+
+            # Decide how each region gets cleaned:
+            #   bubble -> outline touches the crop edge: ellipse mask (keeps tails)
+            #   box    -> clean rectangular text region (title cards etc.)
+            #   free   -> free-floating text: LaMa rectangle
+            for det in detections:
+                edge = self._edge_ink_ratio(image, det['bbox'])
+                det['edge_ink'] = round(float(edge), 4)
+                if det['label'] == 'text_free':
+                    det['shape'] = 'free'
+                else:
+                    det['shape'] = 'box' if edge < self.BOX_EDGE_THRESHOLD else 'bubble'
 
             # Sort in manga reading order (top-to-bottom rows, right-to-left)
             detections = self._sort_bubbles(detections)
@@ -388,6 +503,8 @@ class MangaTranslator:
                     "page_id": page_id,
                     "bbox": [x_min, y_min, x_max, y_max],
                     "label": det['label'],
+                    "shape": det.get('shape', 'bubble'),
+                    "edge_ink": det.get('edge_ink'),
                     "crop_path": crop_path,
                     "original_text": "",
                     "translated_text": ""
@@ -395,10 +512,21 @@ class MangaTranslator:
                 
             return image, manga_data
 
-    def run_ocr(self, manga_data):
+    def run_ocr(self, manga_data, upscale_small_crops=True):
         for entry in manga_data:
             crop_path = entry['crop_path']
-            japanese_text = self.mocr(crop_path)
+            crop = cv2.imread(crop_path)
+            if crop is None:
+                entry['original_text'] = ""
+                continue
+
+            # The OCR model reads small crops better when upscaled
+            if upscale_small_crops and max(crop.shape[:2]) < 300:
+                crop = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+
+            japanese_text = self.mocr(
+                Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+            )
 
             # Apply custom translations to original text
             japanese_text = self._apply_custom_translations(japanese_text)
@@ -563,11 +691,14 @@ Description: {series_info.get('description', 'None')}
 
 
 
-    def clean_page(self, original_image, page_data, ellipse_padding=8, inpaint_radius=5):
+    def clean_page(self, original_image, page_data, inpaint_radius=5):
             """
             Strict Hybrid Cleaning:
-            - text_bubble -> OpenCV Inpainting inside a shrunk Ellipse mask (Preserves tails)
-            - text_free   -> LaMa Inpainting on full Rectangle mask (Redraws background)
+            - bubble: OpenCV inpainting of text ink that is NOT connected to the
+              crop border (outlines and tails are preserved, corner glyphs are
+              cleaned too)
+            - box:    same, plus a 3px rim so rectangular borders survive
+            - free:   LaMa inpainting on a rectangle mask (redraws background)
             """
             final_image = original_image.copy()
             h, w = original_image.shape[:2]
@@ -582,6 +713,7 @@ Description: {series_info.get('description', 'None')}
 
                 bbox = entry['bbox']
                 label = entry.get('label', 'text_free')
+                shape = entry.get('shape') or ('free' if label == 'text_free' else 'bubble')
 
                 x1, y1, x2, y2 = bbox
 
@@ -595,8 +727,8 @@ Description: {series_info.get('description', 'None')}
 
                 gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
-                # --- STRATEGY 1: SPEECH BUBBLES (OpenCV + Shrunk Ellipse) ---
-                if label == 'text_bubble':
+                # --- STRATEGY 1: CLEAN TEXT INK NOT CONNECTED TO THE CROP BORDER ---
+                if shape in ('bubble', 'box'):
                     ch, cw = crop.shape[:2]
 
                     # A. Find the text pixels (dark ink)
@@ -605,29 +737,44 @@ Description: {series_info.get('description', 'None')}
                         cv2.THRESH_BINARY_INV, 21, 10
                     )
 
-                    # B. Create SHRUNK Ellipse Mask
-                    ellipse_mask = np.zeros((ch, cw), dtype=np.uint8)
-                    center = (cw // 2, ch // 2)
-                    # Shrink axes by padding to avoid touching bubble borders
-                    axes = (max(1, cw // 2 - ellipse_padding), max(1, ch // 2 - ellipse_padding))
-                    cv2.ellipse(ellipse_mask, center, axes, 0, 0, 360, 255, -1)
+                    # B. Keep ink connected to the crop border: that is bubble
+                    # outline / tails / panel lines. Everything else is text
+                    # (this also cleans corner glyphs an ellipse mask missed).
+                    num, labels, stats, _ = cv2.connectedComponentsWithStats(binary_text, connectivity=8)
+                    cleanable = np.zeros_like(binary_text)
+                    for i in range(1, num):
+                        bx = stats[i, cv2.CC_STAT_LEFT]
+                        by = stats[i, cv2.CC_STAT_TOP]
+                        bw_i = stats[i, cv2.CC_STAT_WIDTH]
+                        bh_i = stats[i, cv2.CC_STAT_HEIGHT]
+                        touches_border = (bx <= 1 or by <= 1
+                                          or bx + bw_i >= cw - 1 or by + bh_i >= ch - 1)
+                        if not touches_border:
+                            cleanable[labels == i] = 255
 
-                    # C. Combine: Mask ONLY text that is INSIDE the ellipse
-                    final_mask = cv2.bitwise_and(binary_text, ellipse_mask)
+                    if shape == 'box':
+                        # Keep a small rim so faint box borders survive
+                        rim = np.zeros((ch, cw), dtype=np.uint8)
+                        cv2.rectangle(rim, (3, 3), (max(4, cw - 3), max(4, ch - 3)), 255, -1)
+                        cleanable = cv2.bitwise_and(cleanable, rim)
 
-                    # D. Dilate to catch anti-aliasing
+                    # C. Dilate to catch anti-aliasing
                     kernel = np.ones((5,5), np.uint8)
-                    final_mask = cv2.dilate(final_mask, kernel, iterations=1)
+                    final_mask = cv2.dilate(cleanable, kernel, iterations=1)
 
-                    # E. Run OpenCV Inpainting
+                    # D. Run OpenCV Inpainting
                     cleaned_crop = cv2.inpaint(crop, final_mask, inpaint_radius, cv2.INPAINT_TELEA)
 
                     # Paste back
                     final_image[y1:y2, x1:x2] = cleaned_crop
 
                 # --- STRATEGY 2: FREE TEXT (LaMa + Rectangle) ---
-                elif label == 'text_free':
-                    cv2.rectangle(lama_mask, (x1, y1), (x2, y2), 255, -1)
+                elif shape == 'free':
+                    # Keep a small rim when nothing touches the crop edge, so a
+                    # faint box border around free text is not painted over
+                    inset = 4 if (entry.get('edge_ink') or 0) < 0.05 else 0
+                    cv2.rectangle(lama_mask, (x1 + inset, y1 + inset),
+                                  (x2 - inset, y2 - inset), 255, -1)
                     has_lama_work = True
 
             # Run LaMa batch for all free text found
