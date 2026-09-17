@@ -2,50 +2,51 @@ import os
 import json
 import cv2
 import numpy as np
-import textwrap
 import pyphen
 import re
+import requests
+import torch
 from PIL import Image, ImageDraw, ImageFont
 from ultralytics import YOLO
-from langchain_ollama import ChatOllama
-from langchain_core.prompts import ChatPromptTemplate
 from manga_ocr import MangaOcr
-from lama_cleaner.model.lama import LaMa as SimpleLama
-from lama_cleaner.schema import Config as LamaConfig
+from simple_lama_inpainting import SimpleLama
 
 class MangaTranslator:
-    def __init__(self, yolo_model_path='comic_yolov8m.pt', ollama_model="qwen2.5:7b",
-                 font_path="font.ttf", custom_translations=None, keep_honorifics=True, debug=True):
+    def __init__(self, yolo_model_path='comic-speech-bubble-detector.pt',
+                 llm_base_url="http://localhost:8110", llm_model="local",
+                 font_path="animeace2_reg.ttf", custom_translations=None,
+                 keep_honorifics=False, debug=True, device=None):
         """
-        Initialize models. Defaults to qwen2.5:7b for speed on T4 GPUs.
+        Initialize models.
 
         Args:
-            custom_translations: Dictionary of Japanese terms -> English equivalents
+            yolo_model_path: Path to the YOLOv8 speech-bubble detector (.pt).
+            llm_base_url: Base URL of a local OpenAI-compatible LLM server
+                (llama.cpp). Default: the Gemma server on port 8110.
+            llm_model: Model name sent to the LLM server (single-model llama.cpp
+                servers ignore it).
+            font_path: TrueType/OpenType font used for typesetting.
+            custom_translations: Dictionary of Japanese terms -> English equivalents.
+            keep_honorifics: Re-attach romaji honorifics (-san, -chan, ...)
+                when the source text contains them.
+            debug: Save chapter_data.json next to the translated output.
+            device: 'cuda', 'cpu' or None to auto-detect.
         """
         print("Loading YOLO model...")
         self.yolo_model = YOLO(yolo_model_path)
         self.font_path = font_path
 
-        print("Loading LaMa Inpainting model...")
-        self.lama = SimpleLama(device='cuda')
-        self.lama_config = LamaConfig(
-            ldm_steps=1,
-            hd_strategy='Original',
-            hd_strategy_crop_margin=128,
-            hd_strategy_crop_trigger_size=1280,
-            hd_strategy_resize_limit=1280,
-        )
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Loading LaMa Inpainting model... (device={self.device})")
+        self.lama = SimpleLama(device=torch.device(self.device))
 
         print("Loading MangaOCR model...")
-        self.mocr = MangaOcr()
+        self.mocr = MangaOcr(force_cpu=(self.device == "cpu"))
 
-        print("Initializing LLM...")
-        self.llm = ChatOllama(
-            model=ollama_model,
-            temperature=0.3,
-            num_ctx=2048,
-            num_gpu=-1
-        )
+        print("Initializing LLM client...")
+        self.llm_base_url = llm_base_url.rstrip('/')
+        self.llm_model = llm_model
+        self.llm_timeout = 600  # seconds; the first call may load the model server-side
         self.dic = pyphen.Pyphen(lang='en')
 
         # Font cache for performance
@@ -66,6 +67,33 @@ class MangaTranslator:
             print("Warning: pykakasi not installed. Install with 'pip install pykakasi' for romanization support.")
             self.kakasi = None
 
+    def set_llm(self, base_url=None, model=None):
+        """Update the local LLM endpoint (cheap; no models are reloaded)."""
+        if base_url:
+            self.llm_base_url = base_url.rstrip('/')
+        if model:
+            self.llm_model = model
+
+    def _chat(self, user_message, system_message=None, temperature=None):
+        """Send one chat completion request to the local OpenAI-compatible server."""
+        messages = []
+        if system_message:
+            messages.append({"role": "system", "content": system_message})
+        messages.append({"role": "user", "content": user_message})
+
+        response = requests.post(
+            f"{self.llm_base_url}/v1/chat/completions",
+            json={
+                "model": self.llm_model,
+                "messages": messages,
+                "temperature": 0.3 if temperature is None else temperature,
+                "stream": False,
+            },
+            timeout=self.llm_timeout,
+        )
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+
     def _get_font(self, size):
         """Cache fonts to avoid repeated loading"""
         if size not in self.font_cache:
@@ -75,22 +103,28 @@ class MangaTranslator:
                 self.font_cache[size] = ImageFont.load_default()
         return self.font_cache[size]
 
-    def _sort_bubbles(self, bubbles, row_threshold=50):
-        bubbles.sort(key=lambda b: b[1])
+    def _sort_bubbles(self, detections, row_threshold=50):
+        """Sort detections in manga reading order: top-to-bottom rows,
+        right-to-left within each row. `detections` is a list of dicts with a
+        'bbox' key ([x1, y1, x2, y2])."""
+        def y(entry): return entry['bbox'][1]
+        def x(entry): return entry['bbox'][0]
+
+        detections.sort(key=y)
         sorted_bubbles = []
-        if not bubbles:
+        if not detections:
             return sorted_bubbles
 
-        current_row = [bubbles[0]]
-        for i in range(1, len(bubbles)):
-            if abs(bubbles[i][1] - current_row[-1][1]) < row_threshold:
-                current_row.append(bubbles[i])
+        current_row = [detections[0]]
+        for i in range(1, len(detections)):
+            if abs(y(detections[i]) - y(current_row[-1])) < row_threshold:
+                current_row.append(detections[i])
             else:
-                current_row.sort(key=lambda b: b[2], reverse=True)
+                current_row.sort(key=x, reverse=True)
                 sorted_bubbles.extend(current_row)
-                current_row = [bubbles[i]]
+                current_row = [detections[i]]
 
-        current_row.sort(key=lambda b: b[2], reverse=True)
+        current_row.sort(key=x, reverse=True)
         sorted_bubbles.extend(current_row)
         return sorted_bubbles
 
@@ -205,12 +239,13 @@ class MangaTranslator:
                 has_honorific = any(hon.strip('-') in last_word for hon in self.honorifics)
 
                 if not has_honorific and found_honorifics:
-                    # Add the first found honorific to what's likely a name
-                    # Look for capitalized words (likely names)
+                    # Add the first found honorific to what's likely a name.
+                    # Look for capitalized words (likely names) and keep any
+                    # trailing punctuation in place: "Lugh," -> "Lugh-san,"
                     for i in range(len(words) - 1, -1, -1):
-                        if words[i] and words[i][0].isupper():
-                            # Add honorific to this name
-                            words[i] = words[i] + found_honorifics[0]
+                        match = re.match(r"^([A-Z][\w'-]*)([,.;:!?…]*)$", words[i])
+                        if match:
+                            words[i] = f"{match.group(1)}{found_honorifics[0]}{match.group(2)}"
                             translated_text = ' '.join(words)
                             break
 
@@ -331,9 +366,8 @@ class MangaTranslator:
                     "label": label
                 })
 
-            # Sort (top to bottom, right to left for manga)
-            # Note: We need a custom sort function since detections is now a dict, not just a list of boxes
-            detections = sorted(detections, key=lambda x: (x['bbox'][1], -x['bbox'][0]))
+            # Sort in manga reading order (top-to-bottom rows, right-to-left)
+            detections = self._sort_bubbles(detections)
 
             if not os.path.exists(output_dir): os.makedirs(output_dir)
 
@@ -384,8 +418,7 @@ Context: {series_info.get('title', '')} - {series_info.get('tags', '')}
 {text}"""
 
         try:
-            response = self.llm.invoke(prompt)
-            translation = response.content.strip()
+            translation = self._chat(prompt).strip()
 
             # Remove common wrapper phrases
             translation = re.sub(r'^(Here\'s the translation:|Translation:|English:)\s*', '', translation, flags=re.IGNORECASE)
@@ -428,18 +461,13 @@ Description: {series_info.get('description', 'None')}
             "Your entire response must be parseable JSON."
         )
 
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            ("human", "Translate this JSON array:\n{payload}")
-        ])
-
-        chain = prompt | self.llm
-
         max_retries = 3
         content = ""
         try:
-            response = chain.invoke({"payload": json_string})
-            content = response.content.strip()
+            content = self._chat(
+                f"Translate this JSON array:\n{json_string}",
+                system_message=system_prompt,
+            ).strip()
 
             # More aggressive JSON extraction
             if "```" in content:
@@ -470,7 +498,6 @@ Description: {series_info.get('description', 'None')}
                 if entry['id'] in translation_map:
                     translation = translation_map[entry['id']]
 
-                    max_retries = 3
                     # Check if translation contains Japanese characters
                     if self._has_japanese_characters(translation):
                         print(f"    ⚠ Translation for {entry['id']} contains Japanese. Retrying (Max {max_retries})...")
@@ -523,6 +550,14 @@ Description: {series_info.get('description', 'None')}
                 except Exception as e2:
                     print(f"    Failed to translate {entry['id']}: {e2}")
                     entry['translated_text'] = "[Translation Error]"
+
+        # Optionally re-attach romaji honorifics to the finished translations
+        if self.keep_honorifics:
+            for entry in manga_data:
+                if entry.get('translated_text') and entry.get('original_text'):
+                    entry['translated_text'] = self._preserve_honorifics(
+                        entry['original_text'], entry['translated_text']
+                    )
 
         return manga_data
 
@@ -605,9 +640,9 @@ Description: {series_info.get('description', 'None')}
                 mask_pil = Image.fromarray(lama_mask)
 
                 try:
-                    # 1. Run Model (new API expects numpy arrays and config)
-                    result = self.lama(np.array(img_pil), np.array(mask_pil), self.lama_config)
-                    cleaned_lama = cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+                    # 1. Run Model (PIL in, PIL out)
+                    result = self.lama(img_pil, mask_pil)
+                    cleaned_lama = cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
 
                     # 2. Resize fix (LaMa padding issue)
                     if cleaned_lama.shape[:2] != (h, w):
@@ -621,9 +656,23 @@ Description: {series_info.get('description', 'None')}
 
             return final_image
 
-    def typeset(self, original_image, manga_data, output_path):
-        working_img = self.clean_page(original_image, manga_data)
-        # 2. Text Drawing with adaptive sizing and outlines
+    def _render_page(self, original_image, manga_data, cleaning="lama"):
+        """Clean the page, then draw the translated text.
+
+        cleaning='lama': hybrid cleanup (current default) — OpenCV inpainting
+        inside speech bubbles, LaMa inpainting for free text.
+        cleaning='blur': legacy cleanup from the first version — Gaussian blur
+        per bubble; kept for the stage comparison sheet.
+        """
+        if cleaning == "blur":
+            working_img = original_image.copy()
+            for entry in manga_data:
+                if entry.get('translated_text'):
+                    working_img = self._smart_clean_bubble(working_img, entry['bbox'])
+        else:
+            working_img = self.clean_page(original_image, manga_data)
+
+        # Text Drawing with adaptive sizing and outlines
         img_pil = Image.fromarray(cv2.cvtColor(working_img, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(img_pil)
 
@@ -656,12 +705,61 @@ Description: {series_info.get('description', 'None')}
                 outline_width=2, align="center", spacing=2
             )
 
-        final_img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+        return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+
+    def typeset(self, original_image, manga_data, output_path):
+        final_img = self._render_page(original_image, manga_data)
         cv2.imwrite(output_path, final_img)
         print(f"  Saved: {output_path}")
 
+    def save_comparison(self, original_image, manga_data, output_path,
+                        labels=("Not translated", "Translated", "Translated + LaMa inpainting")):
+        """Save a 3-panel sheet: the original page, the page translated with the
+        legacy blur cleanup, and the full pipeline output (OpenCV + LaMa)."""
+        panels = [
+            original_image,
+            self._render_page(original_image, manga_data, cleaning="blur"),
+            self._render_page(original_image, manga_data, cleaning="lama"),
+        ]
+        pil_panels = [Image.fromarray(cv2.cvtColor(p, cv2.COLOR_BGR2RGB)) for p in panels]
+
+        label_font = self._get_label_font(28)
+        bar_h, gap = 48, 12
+        width = sum(p.width for p in pil_panels) + gap * (len(pil_panels) - 1)
+        height = max(p.height for p in pil_panels) + bar_h
+
+        sheet = Image.new("RGB", (width, height), (32, 32, 32))
+        draw = ImageDraw.Draw(sheet)
+        x = 0
+        for label, panel in zip(labels, pil_panels):
+            draw.rectangle([x, 0, x + panel.width, bar_h], fill=(24, 24, 24))
+            text_w = draw.textlength(label, font=label_font)
+            draw.text((x + (panel.width - text_w) / 2, 9), label,
+                      fill=(238, 238, 238), font=label_font)
+            sheet.paste(panel, (x, bar_h))
+            x += panel.width + gap
+
+        sheet.save(output_path)
+        print(f"  Saved comparison: {output_path}")
+
+    def _get_label_font(self, size):
+        """Font for the comparison-sheet labels (falls back to PIL default)."""
+        candidates = (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+        )
+        for path in candidates:
+            if os.path.exists(path):
+                try:
+                    return ImageFont.truetype(path, size)
+                except OSError:
+                    continue
+        return ImageFont.load_default()
+
     def process_chapter(self, input_folder, output_folder, series_info=None,
-                          batch_size=4, selected_batches=None):
+                          batch_size=4, selected_batches=None,
+                          conf_threshold=0.15, save_comparisons=False):
             """
             Process manga chapter in batches for better context and efficiency
             """
@@ -712,7 +810,10 @@ Description: {series_info.get('description', 'None')}
                     page_id = f"p{page_num:03d}"
 
                     try:
-                        img, data = self.detect_and_process(input_path, output_dir=temp_crop_dir, page_id=page_id)
+                        img, data = self.detect_and_process(
+                            input_path, output_dir=temp_crop_dir,
+                            page_id=page_id, conf_threshold=conf_threshold,
+                        )
 
                         if data:
                             print(f"    Running OCR on {len(data)} bubbles...")
@@ -745,6 +846,13 @@ Description: {series_info.get('description', 'None')}
 
                     try:
                         self.typeset(img, page_data, output_path)
+
+                        if save_comparisons:
+                            stem = os.path.splitext(filename)[0]
+                            comparison_path = os.path.join(
+                                output_folder, f"{stem}_comparison.png"
+                            )
+                            self.save_comparison(img, page_data, comparison_path)
                     except Exception as e:
                         print(f"    Error typesetting {filename}: {e}")
 
@@ -777,7 +885,8 @@ if __name__ == "__main__":
 
     translator = MangaTranslator(
         yolo_model_path='comic-speech-bubble-detector.pt',
-        ollama_model="qwen2.5:7b",
+        llm_base_url="http://localhost:8110",
+        llm_model="local",
         font_path="animeace2_reg.ttf",
         custom_translations=custom_translations
     )
@@ -795,7 +904,8 @@ if __name__ == "__main__":
         input_folder='/Your_Chapter_Folder',
         output_folder='/Output_Folder',
         series_info=series_context,
-        batch_size=4 # Depends on your GPU, I found the sweet spot around 3-4 with T4 GPU
+        batch_size=4,          # Depends on your GPU and the LLM context window
+        save_comparisons=True  # Also save <name>_comparison.png per page
     )
 
     # Example 2: Process only specific batches (e.g., batches 1 and 3)
@@ -806,8 +916,3 @@ if __name__ == "__main__":
     #     batch_size=4,
     #     selected_batches=[1, 3]  # Only process batches 1 and 3
     # )
-
-    # Zip result for download
-    import subprocess
-    subprocess.run(['zip', '-r', 'translated_chapter.zip', 'translated_chapter'])
-    print("\nDownload translated_chapter.zip from files panel.")
