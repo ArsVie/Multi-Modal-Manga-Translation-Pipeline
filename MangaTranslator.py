@@ -301,11 +301,20 @@ class MangaTranslator:
             text = text.replace(bad, good)
         return text
 
-    def _calculate_optimal_font_size(self, text, bbox, min_size=12, max_size=32):
+    def _calculate_optimal_font_size(self, text, bbox, min_size=12, max_size=32, shape=None):
         x1, y1, x2, y2 = bbox
         box_width = x2 - x1
         box_height = y2 - y1
         text = self._sanitize_for_font(text)
+
+        # Speech balloons have irregular, rounded outlines, so they get more
+        # clearance than boxes/columns where a rectangle is the real border.
+        if shape == 'bubble':
+            side_margin = max(18, int(box_width * 0.06))
+            vert_margin = max(28, int(box_height * 0.05))
+        else:
+            side_margin = max(12, int(box_width * 0.05))
+            vert_margin = max(18, int(box_height * 0.045))
 
         # Tall regions = vertical text turned sideways. English fits a tall
         # column badly with the default cap, so raise the size cap and wrap to
@@ -315,9 +324,9 @@ class MangaTranslator:
         is_vertical = box_height > (box_width * 1.5)
         if is_vertical:
             max_size = max(max_size, min(84, int(max(box_width, box_height) / 3)))
-            target_width_ratio = 0.88
-        else:
             target_width_ratio = 0.85
+        else:
+            target_width_ratio = 0.82
 
         def try_wrap(size, allow_hard_break):
             font = self._get_font(size)
@@ -331,7 +340,7 @@ class MangaTranslator:
             left, top, right, bottom = temp_draw.multiline_textbbox(
                 (0, 0), wrapped, font=font, align="center"
             )
-            if (bottom - top) <= (box_height - 16) and (right - left) <= (box_width - 10):
+            if (bottom - top) <= (box_height - vert_margin) and (right - left) <= (box_width - side_margin):
                 return wrapped
             return None
 
@@ -834,7 +843,7 @@ Description: {series_info.get('description', 'None')}
 
             # Calculate optimal font size for this bubble
             font_size, wrapped_text = self._calculate_optimal_font_size(
-                text, entry['bbox']
+                text, entry['bbox'], shape=entry.get('shape')
             )
 
             font = self._get_font(font_size)
