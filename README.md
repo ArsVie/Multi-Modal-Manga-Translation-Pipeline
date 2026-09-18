@@ -35,31 +35,50 @@ Page image → YOLOv8 bubble detection → MangaOCR → local LLM translation �
 | Inpainting | `simple-lama-inpainting` (big-lama) + OpenCV | ~196 MB weights, CUDA/CPU |
 | Typesetting | PIL + a comic lettering font (Anime Ace 2.0 recommended) | |
 
-## Setup
+## Quickstart
+
+Python **3.10 – 3.12**, Linux / macOS / WSL2 (Windows-native works too). Roughly **10 minutes** end-to-end on a fast connection — the PyTorch wheel is the long pole (a few GB).
 
 ```bash
+# 1. clone + venv
 git clone https://github.com/ArsVie/Multi-Modal-Manga-Translation-Pipeline
 cd Multi-Modal-Manga-Translation-Pipeline
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate      # Windows: .venv\Scripts\activate
 
-# PyTorch — install the build that matches your driver (CUDA shown; CPU also works)
+# 2. dependencies — install torch FIRST, matching your driver.
+#    Pick the right index URL at pytorch.org/get-started/locally (CPU-only: skip --index-url)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
 pip install -r requirements.txt
+
+# 3. detector weights (~52 MB)
+pip install -U huggingface_hub                          # provides the `hf` CLI
+hf download ogkalu/comic-speech-bubble-detector-yolov8m comic-speech-bubble-detector.pt --local-dir .
+
+# 4. lettering font — any comic-style .ttf/.otf, saved as animeace2_reg.ttf in the
+#    project root (Anime Ace 2.0 from blambot.com is what the samples use),
+#    or point FONT_PATH= at your own file
+
+# 5. an LLM endpoint — ANY OpenAI-compatible server:
+#    Ollama already running?   ollama pull gemma3:27b
+#        → base URL http://localhost:11434, model name "gemma3:27b" in the web UI
+#    llama.cpp?                see "Local LLM server" below (the tuned Gemma 4 26B recipe)
+#    hosted API?               paste the base URL, API key and model name in the web UI
+#    sanity check: llama.cpp serves /health (200 ready, 503 still loading);
+#    anything else is verified through /v1/models automatically
+
+# 6. run
+uvicorn server:app --host 0.0.0.0 --port 8000
+# open http://localhost:8000, drop pages / a folder / a .zip, hit Translate
+
+# 7. optional: verify the whole setup in one command (translates the bundled sample page)
+python scripts/smoke.py
 ```
 
-**Model assets** — not committed, place them in the project root:
-
-1. Bubble detector (~52 MB):
-   ```bash
-   hf download ogkalu/comic-speech-bubble-detector-yolov8m comic-speech-bubble-detector.pt --local-dir .
-   ```
-2. Font — any comic lettering font works; Anime Ace 2.0 is recommended (free from Blambot for indie use). Save it as `animeace2_reg.ttf` / `animeace2_reg.otf` in the project root, or pass `font_path=` / set `FONT_PATH`.
-
-First run also downloads MangaOCR weights (~410 MB, HuggingFace) and `big-lama.pt` (~196 MB) automatically.
+First run auto-downloads MangaOCR (~410 MB) and big-lama (~196 MB). Total pipeline footprint ≈ 5 GB + your LLM weights. A CUDA GPU is recommended; CPU-only works — the device auto-detects.
 
 ## Local LLM server
 
-Translation targets any OpenAI-compatible endpoint. Example — Gemma 4 26B-A4B served by llama.cpp (`llama-server`), reasoning off:
+Translation targets **any OpenAI-compatible endpoint** — llama.cpp, Ollama, LM Studio, vLLM, or a hosted API (paste its base URL + API key + model name in the web UI). The reference configuration this repo is tuned on: Gemma 4 26B-A4B served by llama.cpp (`llama-server`), reasoning off —
 
 ```bash
 llama-server \

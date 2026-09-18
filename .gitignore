@@ -10,6 +10,7 @@ temp_crops/
 chapter_data.json
 translated_*/
 out*/
+smoke_out/
 
 # Model and font assets (downloaded separately — see README)
 *.pt
