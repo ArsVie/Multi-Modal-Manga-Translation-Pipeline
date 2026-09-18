@@ -108,7 +108,7 @@ uvicorn server:app --host 0.0.0.0 --port 8000
 # open http://localhost:8000   (any free port works — 8000 is taken on some setups)
 ```
 
-Drop pages, folders or a `.zip` in (or paste with Ctrl+V), hit Translate, download results. The pipeline sits on the left, translated pages land in the gallery on the right. The UI wears 4chan's "Tomorrow" theme. Advanced settings (persisted in the browser) cover:
+Drop pages, folders or a `.zip` in (or paste with Ctrl+V), hit Translate, download results. After a translation the layout becomes pipeline-on-the-left / page-gallery-on-the-right. The UI wears 4chan's "Tomorrow" theme. Advanced settings (persisted in the browser) cover:
 
 - **Custom names map** — one `jp=English` per line (or comma-separated), applied to OCR output before translation
 - **Series context** — title / tags / description for tone and consistency

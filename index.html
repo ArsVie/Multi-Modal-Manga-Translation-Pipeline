@@ -23,14 +23,20 @@
                 letter-spacing: -2px; }
   .boardSubtitle { font-size: 9pt; }
 
-  .container { max-width: 1500px; margin: 0 auto; display: grid;
-               grid-template-columns: 400px minmax(0, 1fr); gap: 16px; align-items: start; }
-  .rail { position: sticky; top: 8px; min-width: 0; }
+  /* Pre-translation: one centered column. After a translation the container
+     gets .wide: pipeline rail on the left, page gallery on the right. */
+  .container { max-width: 1000px; margin: 0 auto; padding: 0 12px; box-sizing: border-box; }
+  .container.wide { max-width: 1500px; display: grid;
+                    grid-template-columns: 400px minmax(0, 1fr); gap: 24px; align-items: start; }
+  .rail { min-width: 0; }
+  .wide .rail { position: sticky; top: 8px; }
+  .wide .gallery { border-left: 1px solid #282a2e; padding-left: 24px; }
+  .container:not(.wide) .gallery { display: none; }
   .gallery { min-width: 0; }
-  .galleryHead { color: #b294bb; font-weight: bold; margin: 12px 0 6px; }
+  .galleryHead { color: #b294bb; font-weight: bold; margin: 12px 0 8px; }
   @media (max-width: 900px) {
-    .container { grid-template-columns: 1fr; }
-    .rail { position: static; }
+    .container.wide { grid-template-columns: 1fr; }
+    .wide .rail { position: static; }
   }
 
   fieldset.postform, fieldset.adv {
@@ -79,10 +85,8 @@
   .advgrid label.check { cursor: pointer; }
   .advgrid small.note { font-size: 8.5pt; color: #969896; }
 
-  @media (max-width: 640px) { .advgrid { grid-template-columns: 1fr; } }
-
-  .advgrid { display: grid; grid-template-columns: 1fr; gap: 8px 18px; margin-top: 8px; }
-  .advgrid label { display: flex; flex-direction: column; gap: 2px; font-size: 9.5pt; }
+  .advgrid { display: grid; grid-template-columns: 1fr; gap: 11px 18px; margin-top: 8px; }
+  .advgrid label { display: flex; flex-direction: column; gap: 3px; font-size: 9.5pt; }
   .advgrid label.check { flex-direction: row; align-items: center; gap: 6px; }
   .advgrid .full { grid-column: 1 / -1; }
 
@@ -101,10 +105,10 @@
   .err { color: #cc6666; }
   .note { color: #8abeb7; font-size: 9pt; }
 
-  #results { display: flex; flex-direction: column; gap: 10px; }
+  #results { display: flex; flex-direction: column; gap: 12px; }
   .reply { background: #282a2e; border: 1px solid #282a2e;
-           padding: 4px 8px 8px; margin: 8px 0; }
-  .postInfo { font-size: 10pt; margin-bottom: 4px; }
+           padding: 8px 12px 12px; margin: 8px 0; }
+  .postInfo { font-size: 10pt; margin-bottom: 6px; }
   .postInfo .name { font-weight: bold; }
   .postInfo .subject { color: #b294bb; font-weight: bold; }
   .fileText { font-size: 9pt; margin: 2px 0 4px; }
@@ -196,9 +200,12 @@
   var $ = function (id) { return document.getElementById(id); };
   var fileInput = $("file-input"), folderInput = $("folder-input"), thumbs = $("thumbs"), button = $("translate-btn");
   var globalStatus = $("global-status"), results = $("results"), dropzone = $("dropzone");
-  var resultsEmpty = $("results-empty");
+  var resultsEmpty = $("results-empty"), container = document.querySelector(".container");
   function updateGalleryEmpty() {
-    resultsEmpty.style.display = results.children.length ? "none" : "";
+    var hasResults = results.children.length > 0;
+    resultsEmpty.style.display = hasResults ? "none" : "";
+    // the first translated page switches the app to the two-column workspace
+    if (hasResults) container.classList.add("wide");
   }
   var timer = null;
   var busy = false;
