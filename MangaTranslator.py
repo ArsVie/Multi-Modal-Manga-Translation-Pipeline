@@ -18,7 +18,7 @@ class MangaTranslator:
     BOX_EDGE_THRESHOLD = 0.05
 
     def __init__(self, yolo_model_path='comic-speech-bubble-detector.pt',
-                 llm_base_url="http://localhost:8110", llm_model="local",
+                 llm_base_url="http://localhost:8110", llm_model="local", api_key=None,
                  font_path="animeace2_reg.ttf", custom_translations=None,
                  keep_honorifics=False, font_scale=1.0, debug=True, device=None):
         """
@@ -51,6 +51,7 @@ class MangaTranslator:
         print("Initializing LLM client...")
         self.llm_base_url = llm_base_url.rstrip('/')
         self.llm_model = llm_model
+        self.api_key = api_key or None  # sent as "Authorization: Bearer <key>" when set
         self.llm_timeout = 240  # seconds per call; fail fast instead of burning 10-minute waits if the LLM server wedges
         self.dic = pyphen.Pyphen(lang='en')
 
@@ -73,12 +74,17 @@ class MangaTranslator:
             print("Warning: pykakasi not installed. Install with 'pip install pykakasi' for romanization support.")
             self.kakasi = None
 
-    def set_llm(self, base_url=None, model=None):
-        """Update the local LLM endpoint (cheap; no models are reloaded)."""
+    def set_llm(self, base_url=None, model=None, api_key=None):
+        """Update the LLM endpoint (cheap; no models are reloaded).
+
+        api_key: None keeps the current key, "" clears it, a string sets it.
+        """
         if base_url:
             self.llm_base_url = base_url.rstrip('/')
         if model:
             self.llm_model = model
+        if api_key is not None:
+            self.api_key = api_key or None
 
     def _chat(self, user_message, system_message=None, temperature=None):
         """Send one chat completion request to the local OpenAI-compatible server."""
@@ -87,6 +93,7 @@ class MangaTranslator:
             messages.append({"role": "system", "content": system_message})
         messages.append({"role": "user", "content": user_message})
 
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else None
         response = requests.post(
             f"{self.llm_base_url}/v1/chat/completions",
             json={
@@ -95,6 +102,7 @@ class MangaTranslator:
                 "temperature": 0.3 if temperature is None else temperature,
                 "stream": False,
             },
+            headers=headers,
             timeout=self.llm_timeout,
         )
         response.raise_for_status()

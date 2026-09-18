@@ -74,12 +74,27 @@ async def lifespan(_app):
 app = FastAPI(title="Manga Translator", lifespan=lifespan)
 
 
-def _llm_state(base_url):
-    """'ready' when the LLM server has a model loaded, 'loading' while it
-    loads, 'unreachable' when nothing answers."""
+def _llm_state(base_url, api_key=None):
+    """'ready' when the LLM endpoint answers, 'loading' while a local server
+    loads its model, 'auth' when the endpoint rejects the API key,
+    'unreachable' when nothing answers.
+
+    Local llama.cpp servers expose /health; hosted OpenAI-compatible endpoints
+    usually don't, so a 404 there falls back to probing /v1/models (with the
+    key when one is configured)."""
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
     try:
-        health = requests.get(f"{base_url}/health", timeout=3)
-        return "ready" if health.status_code == 200 else "loading"
+        health = requests.get(f"{base_url}/health", timeout=3, headers=headers)
+        if health.status_code == 200:
+            return "ready"
+        if health.status_code == 404:
+            models = requests.get(f"{base_url}/v1/models", timeout=5, headers=headers)
+            if models.status_code == 200:
+                return "ready"
+            if models.status_code in (401, 403):
+                return "auth"
+            return "unreachable"
+        return "loading"
     except requests.RequestException:
         return "unreachable"
 
@@ -157,7 +172,9 @@ def _process(files, settings):
     """Run the full pipeline on the uploaded pages. Blocking; runs in a thread."""
     assert translator is not None  # the endpoint checks this before dispatching
     with pipeline_lock:
-        translator.set_llm(base_url=settings["llm_base_url"], model=None)
+        translator.set_llm(base_url=settings["llm_base_url"],
+                           model=settings["llm_model"] or None,
+                           api_key=settings["api_key"])
         translator.custom_translations = settings["custom_translations"]
         translator.keep_honorifics = settings["keep_honorifics"]
         translator.font_scale = settings["font_scale"]
@@ -239,6 +256,8 @@ async def translate(
     font_scale: float = Form(1.0),
     save_comparisons: bool = Form(True),
     llm_base_url: str = Form(""),
+    llm_model: str = Form(""),
+    api_key: str = Form(""),
 ):
     if translator is None:
         raise HTTPException(503, f"Models are not loaded. {load_error or 'Check the server logs.'}")
@@ -251,12 +270,13 @@ async def translate(
             raise HTTPException(400, f"Unsupported file type: {f.filename} (use PNG/JPG/WEBP/BMP or a .zip)")
 
     base_url = (llm_base_url or LLM_BASE_URL).rstrip("/")
-    state = _llm_state(base_url)
+    state = _llm_state(base_url, api_key=api_key.strip() or None)
     if state != "ready":
         detail = {
             "unreachable": f"LLM server at {base_url} is not reachable. Start it first "
-                           f"(see README: 'Local LLM server').",
+                           f"(see README: 'Local LLM server') or check the base URL.",
             "loading": f"LLM server at {base_url} is still loading its model. Try again in a minute.",
+            "auth": f"LLM server at {base_url} rejected the API key — check the API key field.",
         }.get(state, state)
         raise HTTPException(503, detail)
 
@@ -272,6 +292,8 @@ async def translate(
         "font_scale": min(1.0, max(0.5, font_scale)),
         "save_comparisons": save_comparisons,
         "llm_base_url": base_url,
+        "llm_model": llm_model.strip(),
+        "api_key": api_key.strip(),
     }
 
     try:

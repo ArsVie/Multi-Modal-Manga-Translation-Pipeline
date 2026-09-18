@@ -153,10 +153,14 @@
             <option value="http://localhost:8110">Gemma 4 26B-A4B (:8110)</option>
             <option value="http://localhost:8080">Qwen3.6 35B-A3B (:8080)</option>
             <option value="http://localhost:8111">Qwen3.6 35B-A3B MTP (:8111)</option>
+            <option value="https://api.openai.com">OpenAI (api.openai.com)</option>
+            <option value="https://openrouter.ai/api">OpenRouter</option>
             <option value="custom">Custom…</option>
           </select>
         </label>
         <label>LLM base URL <input type="text" id="llm-url" value="http://localhost:8110"></label>
+        <label>API key <input type="password" id="llm-key" placeholder="blank = none (local servers)"></label>
+        <label>Model name <input type="text" id="llm-model" placeholder="blank = server default (e.g. gpt-4o-mini)"></label>
         <label>Series title <input type="text" id="series-title" placeholder="e.g. Sekai Saikou no Ansatsusha"></label>
         <label>Tags <input type="text" id="series-tags" placeholder="Action, Fantasy, Comedy…"></label>
         <label class="full">Description
@@ -528,7 +532,7 @@
   }
 
   // ---------- advanced settings persistence ----------
-  var fields = ["llm-preset", "llm-url", "series-title", "series-tags", "series-desc",
+  var fields = ["llm-preset", "llm-url", "llm-key", "llm-model", "series-title", "series-tags", "series-desc",
                 "custom-map", "batch-size", "conf", "font-scale", "keep-honorifics", "save-comparisons"];
   function saveSettings() {
     var data = {};
@@ -646,6 +650,8 @@
     fd.append("font_scale", $("font-scale").value);
     fd.append("save_comparisons", $("save-comparisons").checked ? "true" : "false");
     fd.append("llm_base_url", $("llm-url").value.trim());
+    fd.append("api_key", $("llm-key").value.trim());
+    fd.append("llm_model", $("llm-model").value.trim());
 
     items.forEach(function (it, i) { setStatus(i, "processing", "processing…"); });
     button.disabled = true;
