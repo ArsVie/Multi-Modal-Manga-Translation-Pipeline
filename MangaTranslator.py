@@ -51,7 +51,7 @@ class MangaTranslator:
         print("Initializing LLM client...")
         self.llm_base_url = llm_base_url.rstrip('/')
         self.llm_model = llm_model
-        self.llm_timeout = 600  # seconds; the first call may load the model server-side
+        self.llm_timeout = 240  # seconds per call; fail fast instead of burning 10-minute waits if the LLM server wedges
         self.dic = pyphen.Pyphen(lang='en')
 
         # Font cache for performance
@@ -551,40 +551,67 @@ class MangaTranslator:
             entry['original_text'] = japanese_text.replace('\n', '')
         return manga_data
 
-    def _translate_single_bubble(self, text, series_info=None):
-        """Translate a single bubble (fallback method)"""
-        context_str = ""
-        if series_info:
-            context_str = f"""
-Context: {series_info.get('title', '')} - {series_info.get('tags', '')}
-"""
+    def _translate_chunk(self, entries, context_str, system_prompt, depth=0):
+        """One batch LLM call for a group of bubbles -> {bubble_id: translation}.
 
-        prompt = f"""{context_str}Translate this Japanese manga text to natural English. Return ONLY the English translation, nothing else. Never add names or information that is not present in the source text:
-{text}"""
+        Malformed or partial JSON responses are re-asked in halves (floor: 4
+        bubbles, depth 4) so batch context survives; single-bubble calls are
+        never used. Transport errors propagate to the caller (fail fast).
+        """
+        payload = [{"bubble_id": e["id"], "text": e["original_text"]} for e in entries]
+        content = self._chat(
+            "Translate this JSON array:\n" + json.dumps(payload, ensure_ascii=False),
+            system_message=system_prompt,
+        ).strip()
+
+        # Model may wrap the array in prose or code fences; slice out the array.
+        if "```" in content:
+            for part in content.split("```"):
+                part = part.strip()
+                if part.startswith("json"):
+                    part = part[4:].strip()
+                if part.startswith("[") and part.endswith("]"):
+                    content = part
+                    break
+
+        start_idx = content.find("[")
+        end_idx = content.rfind("]")
+        if start_idx != -1 and end_idx != -1:
+            content = content[start_idx:end_idx + 1]
 
         try:
-            translation = self._chat(prompt).strip()
+            parsed = json.loads(content)
+            if not isinstance(parsed, list):
+                raise ValueError("response is not a list")
+        except (json.JSONDecodeError, ValueError) as e:
+            if len(entries) <= 4 or depth >= 4:
+                print(f"  ✗ Batch of {len(entries)} bubble(s) still malformed ({e}); leaving original text in place")
+                return {}
+            mid = len(entries) // 2
+            print(f"  ⚠ Malformed batch response ({e}) — re-asking {len(entries)} bubbles as {mid}+{len(entries) - mid}")
+            out = self._translate_chunk(entries[:mid], context_str, system_prompt, depth + 1)
+            out.update(self._translate_chunk(entries[mid:], context_str, system_prompt, depth + 1))
+            return out
 
-            # Remove common wrapper phrases
-            translation = re.sub(r'^(Here\'s the translation:|Translation:|English:)\s*', '', translation, flags=re.IGNORECASE)
-            translation = translation.strip('"\'')
+        mapping = {}
+        for item in parsed:
+            if isinstance(item, dict):
+                bid, text = item.get("bubble_id"), item.get("translation")
+                if isinstance(bid, str) and isinstance(text, str):
+                    mapping[bid] = text
 
-            return translation
-        except Exception as e:
-            print(f"    Translation error: {e}")
-            return "[Translation Error]"
+        missing = [e for e in entries if e["id"] not in mapping]
+        if missing and len(entries) > 4 and depth < 4:
+            print(f"  ⚠ Response missed {len(missing)} of {len(entries)} bubble(s) — re-asking them")
+            mid = len(missing) // 2 or 1
+            mapping.update(self._translate_chunk(missing[:mid], context_str, system_prompt, depth + 1))
+            mapping.update(self._translate_chunk(missing[mid:], context_str, system_prompt, depth + 1))
+        return mapping
 
     def translate_batch(self, manga_data, series_info=None):
         valid_entries = [e for e in manga_data if e['original_text'].strip()]
         if not valid_entries:
             return manga_data
-
-        input_payload = [
-            {"bubble_id": e["id"], "text": e["original_text"]}
-            for e in valid_entries
-        ]
-
-        json_string = json.dumps(input_payload, ensure_ascii=False)
 
         context_str = ""
         if series_info:
@@ -609,95 +636,52 @@ Description: {series_info.get('description', 'None')}
             "Your entire response must be parseable JSON."
         )
 
-        max_retries = 3
-        content = ""
+        # Translate in bounded chunks: very large bubble counts come back as
+        # long LLM responses that go malformed more easily. Malformed or partial
+        # responses are re-asked in smaller batches (context preserved) —
+        # never one-LLM-call-per-bubble.
+        max_chunk = 24
+        chunks = [valid_entries[i:i + max_chunk] for i in range(0, len(valid_entries), max_chunk)]
+        translation_map = {}
         try:
-            content = self._chat(
-                f"Translate this JSON array:\n{json_string}",
-                system_message=system_prompt,
-            ).strip()
+            for chunk in chunks:
+                translation_map.update(
+                    self._translate_chunk(chunk, context_str, system_prompt, depth=0)
+                )
+        except Exception as e:
+            # Transport-level failure (LLM server down or wedged): stop asking,
+            # keep whatever parsed so far.
+            print(f"  ⚠ LLM unreachable mid-batch ({e}); keeping {len(translation_map)} parsed translation(s)")
 
-            # More aggressive JSON extraction
-            if "```" in content:
-                parts = content.split("```")
-                for part in parts:
-                    part = part.strip()
-                    if part.startswith("json"):
-                        part = part[4:].strip()
-                    if part.startswith("[") and part.endswith("]"):
-                        content = part
-                        break
+        leftover = []
+        for entry in manga_data:
+            if entry['id'] in translation_map:
+                text = translation_map[entry['id']]
+                if self._has_japanese_characters(text):
+                    leftover.append(entry)
+                else:
+                    entry['translated_text'] = text
+            elif entry.get('original_text', '').strip() and not entry.get('translated_text'):
+                leftover.append(entry)  # missing from the response — retry together
 
-            # Find first [ and last ]
-            start_idx = content.find("[")
-            end_idx = content.rfind("]")
-
-            if start_idx != -1 and end_idx != -1:
-                content = content[start_idx:end_idx+1]
-
-            translated_list = json.loads(content)
-
-            if not isinstance(translated_list, list):
-                raise ValueError("Response is not a list")
-
-            translation_map = {item['bubble_id']: item['translation'] for item in translated_list}
-
-            for entry in manga_data:
-                if entry['id'] in translation_map:
-                    translation = translation_map[entry['id']]
-
-                    # Check if translation contains Japanese characters
-                    if self._has_japanese_characters(translation):
-                        print(f"    ⚠ Translation for {entry['id']} contains Japanese. Retrying (Max {max_retries})...")
-
-                        success = False
-                        for attempt in range(max_retries):
-                            retry_text = self._translate_single_bubble(
-                                entry['original_text'], series_info
-                            )
-
-                            # Check if the retry fixed it
-                            if not self._has_japanese_characters(retry_text):
-                                translation = retry_text
-                                success = True
-                                print(f"      ✓ Fixed on attempt {attempt + 1}")
-                                break
-                            else:
-                                print(f"      ✗ Attempt {attempt + 1} failed")
-
-                        # Fallback: Romanize if all retries failed
-                        if not success:
-                            print(f"    ⚠ All retries failed. Romanizing...")
-                            translation = self._romanize_japanese(translation)
-
-                    entry['translated_text'] = translation
-
-                # Handle missing translations (fallback to single mode)
-                elif entry.get('original_text') and not entry.get('translated_text'):
-                     entry['translated_text'] = self._translate_single_bubble(entry['original_text'], series_info)
-
-        except (json.JSONDecodeError, ValueError, KeyError) as e:
-            print(f"  ⚠ Translation error: {e}")
-            if content:
-                print(f"  Raw response: {content[:500]}...")
-            print(f"  Falling back to individual translations...")
-
-            # Fallback: translate one by one
-            for entry in valid_entries:
-                try:
-                    translation = self._translate_single_bubble(
-                        entry['original_text'], series_info
-                    )
-
-                    # Check for Japanese in translation
-                    if self._has_japanese_characters(translation):
-                        print(f"    ⚠ Translation for {entry['id']} has Japanese, romanizing...")
-                        translation = self._romanize_japanese(translation)
-
-                    entry['translated_text'] = translation
-                except Exception as e2:
-                    print(f"    Failed to translate {entry['id']}: {e2}")
-                    entry['translated_text'] = "[Translation Error]"
+        if leftover:
+            print(f"  Re-asking {len(leftover)} leftover bubble(s) as a smaller batch...")
+            try:
+                extra = self._translate_chunk(leftover, context_str, system_prompt, depth=1)
+            except Exception as e:
+                extra = {}
+                print(f"  ⚠ LLM unreachable on leftover retry ({e})")
+            for entry in leftover:
+                text = extra.get(entry['id'])
+                if text and not self._has_japanese_characters(text):
+                    entry['translated_text'] = text
+                elif text:
+                    entry['translated_text'] = self._romanize_japanese(text)
+                elif entry['id'] in translation_map:
+                    entry['translated_text'] = self._romanize_japanese(translation_map[entry['id']])
+            still = [e['id'] for e in leftover if not e.get('translated_text')]
+            if still:
+                print(f"  ✗ Left untranslated (original text kept): {', '.join(still)}")
 
         # Optionally re-attach romaji honorifics to the finished translations
         if self.keep_honorifics:
