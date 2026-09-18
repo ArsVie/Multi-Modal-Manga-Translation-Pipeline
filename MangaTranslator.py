@@ -542,7 +542,7 @@ class MangaTranslator:
 Context: {series_info.get('title', '')} - {series_info.get('tags', '')}
 """
 
-        prompt = f"""{context_str}Translate this Japanese manga text to natural English. Return ONLY the English translation, nothing else:
+        prompt = f"""{context_str}Translate this Japanese manga text to natural English. Return ONLY the English translation, nothing else. Never add names or information that is not present in the source text:
 {text}"""
 
         try:
@@ -584,6 +584,9 @@ Description: {series_info.get('description', 'None')}
             "Translate the following Japanese sentences into natural English."
             "Use the Series Context to determine tone, slang, and character voices. "
             "Maintain dialogue consistency across pages. "
+            "Stay faithful to each source sentence: never add names, characters, or "
+            "information that is not present in the Japanese text being translated. "
+            "Keep translations concise - they must fit inside the original text bubble. "
             "\n\nCRITICAL: Return ONLY a valid JSON array. No explanations, no markdown, no code blocks. "
             'Format: [{{"bubble_id": "p001_1", "translation": "English text here"}}, ...]\n'
             "Your entire response must be parseable JSON."

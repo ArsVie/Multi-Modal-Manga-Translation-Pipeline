@@ -11,6 +11,7 @@ Run:
 
 import base64
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -97,13 +98,13 @@ def status():
 
 
 def _parse_custom_translations(raw):
-    """Parse 'jp=English' lines (one per line, '#' comments allowed)."""
+    """Parse 'jp=English' pairs (one per line or comma-separated, '#' comments allowed)."""
     custom = {}
-    for line in (raw or "").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
+    for chunk in re.split(r"[\n,]", raw or ""):
+        chunk = chunk.strip()
+        if not chunk or chunk.startswith("#") or "=" not in chunk:
             continue
-        jp, _, en = line.partition("=")
+        jp, _, en = chunk.partition("=")
         if jp.strip():
             custom[jp.strip()] = en.strip()
     return custom
