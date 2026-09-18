@@ -301,7 +301,7 @@ class MangaTranslator:
             text = text.replace(bad, good)
         return text
 
-    def _calculate_optimal_font_size(self, text, bbox, min_size=12, max_size=36):
+    def _calculate_optimal_font_size(self, text, bbox, min_size=12, max_size=32):
         x1, y1, x2, y2 = bbox
         box_width = x2 - x1
         box_height = y2 - y1
@@ -310,13 +310,14 @@ class MangaTranslator:
         # Tall regions = vertical text turned sideways. English fits a tall
         # column badly with the default cap, so raise the size cap and wrap to
         # nearly the full width: bigger type fills the height instead of
-        # pooling in a narrow strip.
+        # pooling in a narrow strip. Kept conservative so balloons do not end
+        # up packed edge to edge.
         is_vertical = box_height > (box_width * 1.5)
         if is_vertical:
-            max_size = max(max_size, min(96, int(max(box_width, box_height) / 3)))
-            target_width_ratio = 0.95
+            max_size = max(max_size, min(84, int(max(box_width, box_height) / 3)))
+            target_width_ratio = 0.88
         else:
-            target_width_ratio = 0.9
+            target_width_ratio = 0.85
 
         def try_wrap(size, allow_hard_break):
             font = self._get_font(size)
@@ -330,7 +331,7 @@ class MangaTranslator:
             left, top, right, bottom = temp_draw.multiline_textbbox(
                 (0, 0), wrapped, font=font, align="center"
             )
-            if (bottom - top) <= (box_height - 8) and (right - left) <= (box_width - 4):
+            if (bottom - top) <= (box_height - 16) and (right - left) <= (box_width - 10):
                 return wrapped
             return None
 
