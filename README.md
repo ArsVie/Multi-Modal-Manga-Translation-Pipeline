@@ -105,14 +105,15 @@ t.process_chapter(
 
 ```bash
 uvicorn server:app --host 0.0.0.0 --port 8000
-# open http://localhost:8000
+# open http://localhost:8000   (any free port works — 8000 is taken on some setups)
 ```
 
-Drag pages in, hit Translate, download results. The UI wears 4chan's "Tomorrow" theme. Advanced settings (persisted in the browser) cover:
+Drop pages, folders or a `.zip` in (or paste with Ctrl+V), hit Translate, download results. The pipeline sits on the left, translated pages land in the gallery on the right. The UI wears 4chan's "Tomorrow" theme. Advanced settings (persisted in the browser) cover:
 
-- **Custom names map** — one `jp=English` per line, applied to OCR output before translation
+- **Custom names map** — one `jp=English` per line (or comma-separated), applied to OCR output before translation
 - **Series context** — title / tags / description for tone and consistency
 - **LLM server** — pick the Gemma or Qwen endpoint, or enter a custom URL
+- **Lettering size** — 1.0 = default, lower shrinks the English lettering
 - **Batch size, detection confidence, keep-honorifics, comparison sheets**
 
 `POST /translate` (multipart: `files`, plus the same fields) returns base64 pages for scripting.

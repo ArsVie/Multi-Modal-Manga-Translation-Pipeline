@@ -935,8 +935,9 @@ Description: {series_info.get('description', 'None')}
 
             valid_ext = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
             files = [f for f in os.listdir(input_folder) if f.lower().endswith(valid_ext)]
-            # Sort numerically (p1, p2, p10 instead of p1, p10, p2)
-            files.sort(key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else x)
+            # Natural sort: p1, p2, p10 (also handles names without digits)
+            files.sort(key=lambda x: [int(t) if t.isdigit() else t.lower()
+                                      for t in re.split(r'(\d+)', x)])
 
             total_files = len(files)
             total_batches = (total_files + batch_size - 1) // batch_size

@@ -10,11 +10,13 @@ Run:
 """
 
 import base64
+import io
 import os
 import re
 import shutil
 import tempfile
 import threading
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -35,7 +37,8 @@ FONT_PATH = os.getenv("FONT_PATH", str(BASE_DIR / "animeace2_reg.ttf"))
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:8110")
 LLM_MODEL = os.getenv("LLM_MODEL", "local")
 
-VALID_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+VALID_EXTENSIONS = IMAGE_EXTENSIONS + (".zip",)
 
 translator = None
 load_error = None
@@ -110,6 +113,46 @@ def _parse_custom_translations(raw):
     return custom
 
 
+def _natural_key(name):
+    """Natural sort key: page2 sorts before page10."""
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]
+
+
+def _unique_name(name, taken):
+    """`name`, or name_2 / name_3... when already taken (case-insensitive)."""
+    if name.lower() not in taken:
+        taken.add(name.lower())
+        return name
+    stem, ext = os.path.splitext(name)
+    n = 2
+    while f"{stem}_{n}{ext}".lower() in taken:
+        n += 1
+    final = f"{stem}_{n}{ext}"
+    taken.add(final.lower())
+    return final
+
+
+def _extract_zip(content, dest_dir, taken, max_entries=2000, max_total_bytes=2 * 1024 ** 3):
+    """Extract image files from a zip upload into dest_dir (folders flattened)."""
+    out = []
+    with zipfile.ZipFile(io.BytesIO(content)) as zf:
+        total = 0
+        for info in zf.infolist()[:max_entries]:
+            if info.is_dir():
+                continue
+            base = os.path.basename(info.filename.replace("\\", "/"))
+            if (not base or base.startswith(".") or "__MACOSX" in info.filename
+                    or os.path.splitext(base)[1].lower() not in IMAGE_EXTENSIONS):
+                continue
+            total += info.file_size
+            if total > max_total_bytes:
+                raise ValueError("zip expands to too much data")
+            name = _unique_name(base, taken)
+            (Path(dest_dir) / name).write_bytes(zf.read(info))
+            out.append(name)
+    return out
+
+
 def _process(files, settings):
     """Run the full pipeline on the uploaded pages. Blocking; runs in a thread."""
     assert translator is not None  # the endpoint checks this before dispatching
@@ -124,11 +167,26 @@ def _process(files, settings):
         in_dir = tempfile.mkdtemp(prefix="manga_in_")
         out_dir = tempfile.mkdtemp(prefix="manga_out_")
         try:
-            names = []
+            page_names = []
+            taken = set()
+            zip_failures = []
             for name, content in files:
-                safe = os.path.basename(name) or f"page_{len(names) + 1}.jpg"
-                (Path(in_dir) / safe).write_bytes(content)
-                names.append(safe)
+                safe = os.path.basename(name) or f"page_{len(page_names) + 1}.jpg"
+                if safe.lower().endswith(".zip"):
+                    try:
+                        extracted = _extract_zip(content, in_dir, taken)
+                    except Exception as exc:
+                        zip_failures.append((safe, f"could not unpack {safe}: {exc}"))
+                        continue
+                    if not extracted:
+                        zip_failures.append((safe, f"{safe} contained no images"))
+                    page_names.extend(extracted)
+                    continue
+                final = _unique_name(safe, taken)
+                (Path(in_dir) / final).write_bytes(content)
+                page_names.append(final)
+
+            page_names.sort(key=_natural_key)
 
             series_info = None
             if settings["title"] or settings["tags"] or settings["description"]:
@@ -148,7 +206,7 @@ def _process(files, settings):
             )
 
             pages = []
-            for name in names:
+            for name in page_names:
                 out_path = Path(out_dir) / name
                 comparison_path = Path(out_dir) / f"{Path(name).stem}_comparison.png"
                 page = {"filename": name, "translated_b64": None, "comparison_b64": None}
@@ -159,6 +217,9 @@ def _process(files, settings):
                 if comparison_path.exists():
                     page["comparison_b64"] = base64.b64encode(comparison_path.read_bytes()).decode()
                 pages.append(page)
+            for fname, err in zip_failures:
+                pages.append({"filename": fname, "translated_b64": None,
+                              "comparison_b64": None, "error": err})
             return pages
         finally:
             shutil.rmtree(in_dir, ignore_errors=True)
@@ -187,7 +248,7 @@ async def translate(
 
     for f in files:
         if Path(f.filename or "").suffix.lower() not in VALID_EXTENSIONS:
-            raise HTTPException(400, f"Unsupported file type: {f.filename} (use PNG/JPG/WEBP/BMP)")
+            raise HTTPException(400, f"Unsupported file type: {f.filename} (use PNG/JPG/WEBP/BMP or a .zip)")
 
     base_url = (llm_base_url or LLM_BASE_URL).rstrip("/")
     state = _llm_state(base_url)

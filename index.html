@@ -23,7 +23,15 @@
                 letter-spacing: -2px; }
   .boardSubtitle { font-size: 9pt; }
 
-  .container { max-width: 1000px; margin: 0 auto; }
+  .container { max-width: 1500px; margin: 0 auto; display: grid;
+               grid-template-columns: 400px minmax(0, 1fr); gap: 16px; align-items: start; }
+  .rail { position: sticky; top: 8px; min-width: 0; }
+  .gallery { min-width: 0; }
+  .galleryHead { color: #b294bb; font-weight: bold; margin: 12px 0 6px; }
+  @media (max-width: 900px) {
+    .container { grid-template-columns: 1fr; }
+    .rail { position: static; }
+  }
 
   fieldset.postform, fieldset.adv {
     background: #282a2e; border: 1px solid #282a2e; padding: 8px 10px; margin: 12px 0;
@@ -44,15 +52,19 @@
   .dropzone:hover, .dropzone.drag { border-color: #81a2be; color: #81a2be; }
   .dropzone kbd { background: #1d1f21; border: 1px solid #3a3d42; border-bottom-width: 2px;
                   padding: 0 4px; font-family: inherit; font-size: 9pt; color: #c5c8c6; }
-  #file-input { display: none; }
+  .dropzone .dz-links { font-size: 9pt; margin-top: 4px; }
+  .dropzone .dz-links a { text-decoration: underline; cursor: pointer; }
+  #file-input, #folder-input { display: none; }
 
   /* -------- upload queue (thumbnails) -------- */
-  .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+  .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
             gap: 8px; margin: 8px 0 4px; }
   .thumb { position: relative; background: #1d1f21; border: 1px solid #3a3d42;
            padding: 4px; display: flex; flex-direction: column; gap: 3px; }
   .thumb.dragover { border-color: #81a2be; }
   .thumb .pic { width: 100%; height: 92px; object-fit: contain; background: #16181a; display: block; }
+  .thumb .pic.zip { display: flex; align-items: center; justify-content: center;
+                    font-weight: bold; color: #b294bb; letter-spacing: 3px; font-size: 15pt; }
   .thumb .num { position: absolute; top: 7px; left: 7px; background: #81a2be; color: #1d1f21;
                 font-size: 8pt; font-weight: bold; padding: 0 5px; }
   .thumb .fname { font-size: 8.5pt; color: #8abeb7; white-space: nowrap;
@@ -69,7 +81,7 @@
 
   @media (max-width: 640px) { .advgrid { grid-template-columns: 1fr; } }
 
-  .advgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px; margin-top: 8px; }
+  .advgrid { display: grid; grid-template-columns: 1fr; gap: 8px 18px; margin-top: 8px; }
   .advgrid label { display: flex; flex-direction: column; gap: 2px; font-size: 9.5pt; }
   .advgrid label.check { flex-direction: row; align-items: center; gap: 6px; }
   .advgrid .full { grid-column: 1 / -1; }
@@ -89,9 +101,9 @@
   .err { color: #cc6666; }
   .note { color: #8abeb7; font-size: 9pt; }
 
-  #results { margin-top: 14px; }
+  #results { display: flex; flex-direction: column; gap: 10px; }
   .reply { background: #282a2e; border: 1px solid #282a2e;
-           padding: 4px 8px 8px; margin: 8px 0; display: table; }
+           padding: 4px 8px 8px; margin: 8px 0; }
   .postInfo { font-size: 10pt; margin-bottom: 4px; }
   .postInfo .name { font-weight: bold; }
   .postInfo .subject { color: #b294bb; font-weight: bold; }
@@ -117,11 +129,15 @@
 
 <div class="container">
 
+  <div class="rail">
   <fieldset class="postform">
     <legend>Start a translation</legend>
 
-    <div class="dropzone" id="dropzone">Drop pages here, click to browse, or paste with <kbd>Ctrl</kbd>+<kbd>V</kbd> — PNG / JPG / WEBP</div>
-    <input type="file" id="file-input" multiple accept="image/jpeg,image/png,image/webp,image/bmp">
+    <div class="dropzone" id="dropzone">Drop pages, folders or a .zip — or click to browse, or paste with <kbd>Ctrl</kbd>+<kbd>V</kbd>
+      <div class="dz-links">PNG / JPG / WEBP / ZIP · <a id="pick-folder">browse a folder…</a></div>
+    </div>
+    <input type="file" id="file-input" multiple accept="image/jpeg,image/png,image/webp,image/bmp,.zip,application/zip">
+    <input type="file" id="folder-input" webkitdirectory multiple>
     <div class="note" id="queue-note"></div>
     <div class="thumbs" id="thumbs"></div>
 
@@ -165,16 +181,25 @@
       <span id="global-status" class="note"></span>
     </div>
   </fieldset>
+  </div>
 
-  <div id="results"></div>
+  <div class="gallery">
+    <div class="galleryHead">Pages</div>
+    <div id="results-empty" class="note">Translated pages will appear here — add pages on the left and hit Translate.</div>
+    <div id="results"></div>
+  </div>
 </div>
 
 <script>
 (function () {
   var items = [];   // [{ file: File, url: objectURL }]
   var $ = function (id) { return document.getElementById(id); };
-  var fileInput = $("file-input"), thumbs = $("thumbs"), button = $("translate-btn");
+  var fileInput = $("file-input"), folderInput = $("folder-input"), thumbs = $("thumbs"), button = $("translate-btn");
   var globalStatus = $("global-status"), results = $("results"), dropzone = $("dropzone");
+  var resultsEmpty = $("results-empty");
+  function updateGalleryEmpty() {
+    resultsEmpty.style.display = results.children.length ? "none" : "";
+  }
   var timer = null;
   var busy = false;
   var holdStatusUntil = 0;  // keep the last result message visible
@@ -206,11 +231,18 @@
       t.draggable = true;
       t.dataset.index = i;
 
-      var img = document.createElement("img");
-      img.className = "pic";
-      img.src = it.url;
-      img.alt = it.file.name;
-      t.appendChild(img);
+      var pic;
+      if (it.url) {
+        pic = document.createElement("img");
+        pic.className = "pic";
+        pic.src = it.url;
+        pic.alt = it.file.name;
+      } else {
+        pic = document.createElement("div");
+        pic.className = "pic zip";
+        pic.textContent = "ZIP";
+      }
+      t.appendChild(pic);
 
       var num = document.createElement("span");
       num.className = "num";
@@ -220,7 +252,7 @@
       var name = document.createElement("div");
       name.className = "fname";
       name.textContent = it.file.name;
-      name.title = it.file.name;
+      name.title = it.file.webkitRelativePath || it.file.name;
       t.appendChild(name);
 
       var meta = document.createElement("div");
@@ -265,7 +297,7 @@
       thumbs.appendChild(t);
     });
     $("queue-note").textContent = items.length
-      ? items.length + (items.length === 1 ? " page" : " pages") + " queued — reorder with \u25C0 \u25B6 or drag \u00B7 \u2715 removes"
+      ? items.length + (items.length === 1 ? " item" : " items") + " queued — reorder with \u25C0 \u25B6 or drag \u00B7 \u2715 removes"
       : "";
     button.disabled = items.length === 0;
   }
@@ -280,7 +312,7 @@
   }
 
   function remove(i) {
-    if (items[i]) URL.revokeObjectURL(items[i].url);
+    if (items[i] && items[i].url) URL.revokeObjectURL(items[i].url);
     items.splice(i, 1);
     renderFiles();
   }
@@ -296,23 +328,88 @@
     return base + "_" + n + ext;
   }
 
+  function natKey(s) {
+    return String(s).toLowerCase().split(/(\d+)/).map(function (p) {
+      return /^\d+$/.test(p) ? ("0000000000" + p).slice(-10) : p;
+    }).join("");
+  }
+
+  function natCmp(a, b) {
+    var ka = natKey(a), kb = natKey(b);
+    return ka < kb ? -1 : (ka > kb ? 1 : 0);
+  }
+
+  function isAccepted(f) {
+    return f && (f.type.indexOf("image/") === 0
+      || /\.(png|jpe?g|webp|bmp)$/i.test(f.name || "")
+      || /\.zip$/i.test(f.name || ""));
+  }
+
   function addFiles(list) {
-    Array.prototype.slice.call(list).forEach(function (f) {
-      if (!f || !(f.type.indexOf("image/") === 0 || /\.(png|jpe?g|webp|bmp)$/i.test(f.name))) return;
+    var arr = Array.prototype.slice.call(list).filter(isAccepted);
+    // Folders arrive unordered: sort by path so pages keep reading order
+    arr.sort(function (a, b) {
+      return natCmp(a.webkitRelativePath || a.name || "", b.webkitRelativePath || b.name || "");
+    });
+    arr.forEach(function (f) {
       var name = uniqueName(f.name || ("pasted_" + Date.now() + ".png"));
       var file = (name !== f.name) ? new File([f], name, { type: f.type }) : f;
-      items.push({ file: file, url: URL.createObjectURL(file) });
+      var isImg = file.type.indexOf("image/") === 0
+        || /\.(png|jpe?g|webp|bmp)$/i.test(file.name);
+      items.push({ file: file, url: isImg ? URL.createObjectURL(file) : null });
     });
     renderFiles();
   }
 
+  // Walk dropped folders/files (DataTransfer entries -> flat file list)
+  function gatherEntries(list, cb) {
+    var found = [], pending = 1;
+    function done() {
+      if (--pending) return;
+      found.sort(function (a, b) { return natCmp(a.path, b.path); });
+      cb(found.map(function (x) { return x.file; }));
+    }
+    function walk(entry) {
+      pending++;
+      if (entry.isFile) {
+        entry.file(function (f) { found.push({ file: f, path: entry.fullPath || f.name }); done(); }, done);
+      } else if (entry.isDirectory) {
+        var reader = entry.createReader();
+        (function readBatch() {
+          reader.readEntries(function (ents) {
+            if (!ents.length) { done(); return; }
+            ents.forEach(walk);
+            readBatch();
+          }, done);
+        })();
+      } else { done(); }
+    }
+    for (var i = 0; i < list.length; i++) {
+      var it = list[i], entry = null;
+      if (it.kind === "file" && it.webkitGetAsEntry) entry = it.webkitGetAsEntry();
+      if (entry) walk(entry);
+      else if (it.kind === "file") { var f = it.getAsFile(); if (f) found.push({ file: f, path: f.name }); }
+    }
+    done();
+  }
+
   dropzone.addEventListener("click", function () { fileInput.click(); });
+  $("pick-folder").addEventListener("click", function (e) {
+    e.stopPropagation();
+    folderInput.click();
+  });
+  folderInput.addEventListener("change", function () { addFiles(folderInput.files); folderInput.value = ""; });
   dropzone.addEventListener("dragover", function (e) { e.preventDefault(); dropzone.classList.add("drag"); });
   dropzone.addEventListener("dragleave", function () { dropzone.classList.remove("drag"); });
   dropzone.addEventListener("drop", function (e) {
     e.preventDefault();
     dropzone.classList.remove("drag");
-    if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+    if (e.dataTransfer.items && e.dataTransfer.items.length
+        && e.dataTransfer.items[0].webkitGetAsEntry) {
+      gatherEntries(e.dataTransfer.items, function (files) { addFiles(files); });
+    } else if (e.dataTransfer.files.length) {
+      addFiles(e.dataTransfer.files);
+    }
   });
   fileInput.addEventListener("change", function () { addFiles(fileInput.files); fileInput.value = ""; });
 
@@ -321,9 +418,9 @@
     var list = (e.clipboardData && e.clipboardData.items) || [];
     var imgs = [];
     for (var i = 0; i < list.length; i++) {
-      if (list[i].kind === "file" && list[i].type.indexOf("image/") === 0) {
+      if (list[i].kind === "file") {
         var f = list[i].getAsFile();
-        if (f) imgs.push(f);
+        if (f && isAccepted(f)) imgs.push(f);
       }
     }
     if (imgs.length) {
@@ -468,6 +565,7 @@
     busy = true;
     holdStatusUntil = 0;
     results.innerHTML = "";
+    updateGalleryEmpty();
 
     var started = Date.now();
     globalStatus.textContent = "Translating " + items.length + " page(s) — 0:00 elapsed";
@@ -486,10 +584,16 @@
       })
       .then(function (body) {
         clearInterval(timer);
-        body.pages.forEach(function (page, i) {
-          setStatus(i, page.error ? "error" : "done", page.error ? "error" : "done");
-          results.appendChild(makePost(page, i));
-        });
+        var perItem = body.pages.length === items.length;
+        if (perItem) {
+          body.pages.forEach(function (page, i) {
+            setStatus(i, page.error ? "error" : "done", page.error ? "error" : "done");
+          });
+        } else {
+          items.forEach(function (it, i) { setStatus(i, "done", "done"); });
+        }
+        body.pages.forEach(function (page, i) { results.appendChild(makePost(page, i)); });
+        updateGalleryEmpty();
         var ok = body.pages.filter(function (p) { return !p.error; }).length;
         globalStatus.textContent = "Done — " + ok + "/" + body.pages.length + " page(s) translated in " +
           fmtTime(Math.floor((Date.now() - started) / 1000)) + ".";
