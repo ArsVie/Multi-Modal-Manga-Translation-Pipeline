@@ -211,6 +211,65 @@
   var busy = false;
   var holdStatusUntil = 0;  // keep the last result message visible
 
+  // ---------- time estimates ----------
+  var PER_PAGE_KEY = "manga-per-page-s";
+  function perPageSeconds() {
+    var v = parseFloat(localStorage.getItem(PER_PAGE_KEY));
+    return (v > 3 && v < 300) ? v : 20;  // measured rolling average, 20 s default
+  }
+  function savePerPage(wallSeconds, pages) {
+    if (!pages) return;
+    var measured = wallSeconds / pages;
+    if (measured < 3 || measured > 300) return;  // ignore stub runs / freak results
+    var old = parseFloat(localStorage.getItem(PER_PAGE_KEY));
+    var next = (old > 3 && old < 300) ? (old * 0.6 + measured * 0.4) : measured;
+    localStorage.setItem(PER_PAGE_KEY, next.toFixed(1));
+  }
+  function fmtDuration(s) {
+    s = Math.max(0, Math.round(s));
+    if (s < 60) return s + " s";
+    var m = s / 60;
+    if (m < 10) return m.toFixed(m < 3 ? 1 : 0) + " min";
+    if (m < 60) return Math.round(m) + " min";
+    return (m / 60).toFixed(1) + " h";
+  }
+
+  // Count image entries in a .zip by reading its central directory
+  // (cheap: only the tail + directory bytes are fetched).
+  function zipPageCount(file, cb) {
+    var tailLen = Math.min(file.size, 66000);
+    file.slice(file.size - tailLen).arrayBuffer().then(function (tail) {
+      var dv = new DataView(tail), eocd = -1;
+      for (var i = tail.byteLength - 22; i >= 0; i--) {
+        if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+      }
+      if (eocd < 0) return cb(null);
+      var count = dv.getUint16(eocd + 10, true);
+      var cdSize = dv.getUint32(eocd + 12, true);
+      var cdOff = dv.getUint32(eocd + 16, true);
+      if (count === 0xffff || cdOff === 0xffffffff || cdSize > 64 * 1024 * 1024) return cb(null);
+      file.slice(cdOff, cdOff + cdSize).arrayBuffer().then(function (cd) {
+        try {
+          var d2 = new DataView(cd), p = 0, n = 0, seen = 0;
+          while (p + 46 <= cd.byteLength && seen < count) {
+            if (d2.getUint32(p, true) !== 0x02014b50) break;
+            var nameLen = d2.getUint16(p + 28, true);
+            var extraLen = d2.getUint16(p + 30, true);
+            var cmtLen = d2.getUint16(p + 32, true);
+            var name = "", b = new Uint8Array(cd, p + 46, nameLen);
+            for (var k = 0; k < nameLen; k++) name += String.fromCharCode(b[k]);
+            if (/\.(png|jpe?g|webp|bmp)$/i.test(name)
+                && name.indexOf("__MACOSX/") !== 0
+                && !/(^|\/)\._/.test(name)) n++;
+            p += 46 + nameLen + extraLen + cmtLen;
+            seen++;
+          }
+          cb(n > 0 ? n : null);
+        } catch (e) { cb(null); }
+      }).catch(function () { cb(null); });
+    }).catch(function () { cb(null); });
+  }
+
   // ---------- status banner ----------
   function refreshStatus() {
     if (busy || Date.now() < holdStatusUntil) return;
@@ -303,9 +362,23 @@
 
       thumbs.appendChild(t);
     });
-    $("queue-note").textContent = items.length
-      ? items.length + (items.length === 1 ? " item" : " items") + " queued — reorder with \u25C0 \u25B6 or drag \u00B7 \u2715 removes"
-      : "";
+    var pages = 0, unknown = 0, anyZip = false;
+    items.forEach(function (it) {
+      if (it.pages === null) unknown++;
+      else pages += (it.pages > 0 ? it.pages : 1);
+      if (/\.zip$/i.test(it.file.name)) anyZip = true;
+    });
+    if (!items.length) {
+      $("queue-note").textContent = "";
+    } else if (unknown) {
+      $("queue-note").textContent = items.length + (items.length === 1 ? " item" : " items") +
+        " queued \u2014 counting zip pages\u2026";
+    } else {
+      $("queue-note").textContent = items.length + (items.length === 1 ? " item" : " items") +
+        " \u00B7 " + (anyZip ? "~" : "") + pages + (pages === 1 ? " page" : " pages") +
+        " \u00B7 est. " + fmtDuration(perPageSeconds() * pages) +
+        " \u2014 reorder with \u25C0 \u25B6 or drag \u00B7 \u2715 removes";
+    }
     button.disabled = items.length === 0;
   }
 
@@ -363,7 +436,14 @@
       var file = (name !== f.name) ? new File([f], name, { type: f.type }) : f;
       var isImg = file.type.indexOf("image/") === 0
         || /\.(png|jpe?g|webp|bmp)$/i.test(file.name);
-      items.push({ file: file, url: isImg ? URL.createObjectURL(file) : null });
+      var it = { file: file, url: isImg ? URL.createObjectURL(file) : null, pages: isImg ? 1 : null };
+      items.push(it);
+      if (!isImg) {  // zip: count image entries so batches get a real ETA
+        zipPageCount(file, function (n) {
+          it.pages = n || 0;
+          renderFiles();
+        });
+      }
     });
     renderFiles();
   }
@@ -575,11 +655,17 @@
     updateGalleryEmpty();
 
     var started = Date.now();
-    globalStatus.textContent = "Translating " + items.length + " page(s) — 0:00 elapsed";
+    var estPages = 0;
+    items.forEach(function (it) { estPages += (it.pages > 0) ? it.pages : 1; });
+    var estTotal = estPages * perPageSeconds();
+    globalStatus.textContent = "Translating ~" + estPages + " page(s) \u2014 0:00 elapsed, est. " +
+      fmtDuration(estTotal) + " total";
     globalStatus.style.color = "#f0c674";
     timer = setInterval(function () {
-      globalStatus.textContent = "Translating " + items.length + " page(s) — " +
-        fmtTime(Math.floor((Date.now() - started) / 1000)) + " elapsed";
+      var el = Math.floor((Date.now() - started) / 1000);
+      var left = Math.round(estTotal - el);
+      globalStatus.textContent = "Translating ~" + estPages + " page(s) \u2014 " + fmtTime(el) + " elapsed" +
+        (left > 5 ? ", ~" + fmtDuration(left) + " left" : ", finishing up\u2026");
     }, 1000);
 
     fetch("/translate", { method: "POST", body: fd })
@@ -602,8 +688,10 @@
         body.pages.forEach(function (page, i) { results.appendChild(makePost(page, i)); });
         updateGalleryEmpty();
         var ok = body.pages.filter(function (p) { return !p.error; }).length;
+        var wall = Math.floor((Date.now() - started) / 1000);
+        savePerPage(wall, body.pages.length);
         globalStatus.textContent = "Done — " + ok + "/" + body.pages.length + " page(s) translated in " +
-          fmtTime(Math.floor((Date.now() - started) / 1000)) + ".";
+          fmtTime(wall) + " (~" + Math.max(1, Math.round(wall / Math.max(1, body.pages.length))) + " s/page).";
         globalStatus.style.color = "#b5bd68";
         holdStatusUntil = Date.now() + 5 * 60 * 1000;
         button.disabled = false;
