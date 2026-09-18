@@ -117,6 +117,9 @@ def _process(files, settings):
         translator.set_llm(base_url=settings["llm_base_url"], model=None)
         translator.custom_translations = settings["custom_translations"]
         translator.keep_honorifics = settings["keep_honorifics"]
+        translator.font_scale = settings["font_scale"]
+        if settings["font_scale"] != 1.0:
+            print(f"  (lettering scale {settings['font_scale']})")
 
         in_dir = tempfile.mkdtemp(prefix="manga_in_")
         out_dir = tempfile.mkdtemp(prefix="manga_out_")
@@ -172,6 +175,7 @@ async def translate(
     keep_honorifics: bool = Form(False),
     conf_threshold: float = Form(0.15),
     batch_size: int = Form(4),
+    font_scale: float = Form(1.0),
     save_comparisons: bool = Form(True),
     llm_base_url: str = Form(""),
 ):
@@ -204,6 +208,7 @@ async def translate(
         "keep_honorifics": keep_honorifics,
         "conf_threshold": conf_threshold,
         "batch_size": batch_size,
+        "font_scale": min(1.0, max(0.5, font_scale)),
         "save_comparisons": save_comparisons,
         "llm_base_url": base_url,
     }

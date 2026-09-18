@@ -20,7 +20,7 @@ class MangaTranslator:
     def __init__(self, yolo_model_path='comic-speech-bubble-detector.pt',
                  llm_base_url="http://localhost:8110", llm_model="local",
                  font_path="animeace2_reg.ttf", custom_translations=None,
-                 keep_honorifics=False, debug=True, device=None):
+                 keep_honorifics=False, font_scale=1.0, debug=True, device=None):
         """
         Initialize models.
 
@@ -61,6 +61,7 @@ class MangaTranslator:
         self.custom_translations = custom_translations or {}
 
         self.keep_honorifics = keep_honorifics
+        self.font_scale = float(font_scale)  # 1.0 = default; lower shrinks lettering
         self.debug = debug
         self.honorifics = ['san', 'chan', 'kun', 'sama', 'senpai', 'sensei', 'dono', 'tan']
 
@@ -306,6 +307,12 @@ class MangaTranslator:
         box_width = x2 - x1
         box_height = y2 - y1
         text = self._sanitize_for_font(text)
+
+        # Global lettering-size lever (web UI "Lettering size"): shrink the
+        # effective box so the chosen size scales down proportionally.
+        if self.font_scale != 1.0:
+            box_width = max(40, int(box_width * self.font_scale))
+            box_height = max(40, int(box_height * self.font_scale))
 
         # Speech balloons have irregular, rounded outlines, so they get more
         # clearance than boxes/columns where a rectangle is the real border.

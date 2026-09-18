@@ -152,6 +152,9 @@
         <label>Detection confidence (lower = more bubbles)
           <input type="number" id="conf" value="0.15" min="0.05" max="0.9" step="0.05">
         </label>
+        <label>Lettering size (1.0 = default, lower = smaller)
+          <input type="number" id="font-scale" value="1.0" min="0.5" max="1.0" step="0.05">
+        </label>
         <label class="check"><input type="checkbox" id="keep-honorifics"> Keep honorifics (-san, -chan…)</label>
         <label class="check"><input type="checkbox" id="save-comparisons" checked> Show comparison sheet (Original / Translated / Translated + LaMa)</label>
       </div>
@@ -342,7 +345,7 @@
 
   // ---------- advanced settings persistence ----------
   var fields = ["llm-preset", "llm-url", "series-title", "series-tags", "series-desc",
-                "custom-map", "batch-size", "conf", "keep-honorifics", "save-comparisons"];
+                "custom-map", "batch-size", "conf", "font-scale", "keep-honorifics", "save-comparisons"];
   function saveSettings() {
     var data = {};
     fields.forEach(function (id) {
@@ -456,6 +459,7 @@
     fd.append("keep_honorifics", $("keep-honorifics").checked ? "true" : "false");
     fd.append("conf_threshold", $("conf").value);
     fd.append("batch_size", $("batch-size").value);
+    fd.append("font_scale", $("font-scale").value);
     fd.append("save_comparisons", $("save-comparisons").checked ? "true" : "false");
     fd.append("llm_base_url", $("llm-url").value.trim());
 
