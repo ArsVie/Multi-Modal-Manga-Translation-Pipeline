@@ -16,14 +16,12 @@
   a:hover { color: #5F89AC; }
   hr { border: none; border-top: 1px solid #282a2e; height: 0; }
 
-  #nav { font-size: 9pt; }
-  #nav a { padding: 0 2px; }
-  #nav .right { float: right; }
+  #nav { font-size: 9pt; text-align: right; }
 
   .boardBanner { text-align: center; clear: both; margin: 10px 0 6px; }
   .boardTitle { font-family: Tahoma, sans-serif; font-size: 28px; font-weight: bold;
                 letter-spacing: -2px; }
-  .boardSubtitle { font-size: x-small; }
+  .boardSubtitle { font-size: 9pt; }
 
   .container { max-width: 1000px; margin: 0 auto; }
 
@@ -40,11 +38,36 @@
   textarea { width: 100%; resize: vertical; }
 
   .dropzone {
-    border: 2px dashed #3a3d42; padding: 18px; text-align: center;
+    border: 2px dashed #3a3d42; padding: 16px; text-align: center;
     color: #8abeb7; cursor: pointer; margin-bottom: 6px;
   }
   .dropzone:hover, .dropzone.drag { border-color: #81a2be; color: #81a2be; }
+  .dropzone kbd { background: #1d1f21; border: 1px solid #3a3d42; border-bottom-width: 2px;
+                  padding: 0 4px; font-family: inherit; font-size: 9pt; color: #c5c8c6; }
   #file-input { display: none; }
+
+  /* -------- upload queue (thumbnails) -------- */
+  .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+            gap: 8px; margin: 8px 0 4px; }
+  .thumb { position: relative; background: #1d1f21; border: 1px solid #3a3d42;
+           padding: 4px; display: flex; flex-direction: column; gap: 3px; }
+  .thumb.dragover { border-color: #81a2be; }
+  .thumb .pic { width: 100%; height: 92px; object-fit: contain; background: #16181a; display: block; }
+  .thumb .num { position: absolute; top: 7px; left: 7px; background: #81a2be; color: #1d1f21;
+                font-size: 8pt; font-weight: bold; padding: 0 5px; }
+  .thumb .fname { font-size: 8.5pt; color: #8abeb7; white-space: nowrap;
+                  overflow: hidden; text-overflow: ellipsis; }
+  .thumb .fmeta { font-size: 8pt; color: #969896; display: flex; justify-content: space-between; }
+  .thumb .fctl { display: flex; gap: 4px; }
+  .thumb .fctl button { flex: 1; padding: 3px 0; font-size: 9.5pt; line-height: 1.3; }
+  .thumb .fctl button.rm { flex: 0 0 34px; }
+
+  ::placeholder { color: #6b6f74; }
+  :focus-visible { outline: 1px solid #81a2be; outline-offset: 1px; }
+  .advgrid label.check { cursor: pointer; }
+  .advgrid small.note { font-size: 8.5pt; color: #969896; }
+
+  @media (max-width: 640px) { .advgrid { grid-template-columns: 1fr; } }
 
   .advgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 18px; margin-top: 8px; }
   .advgrid label { display: flex; flex-direction: column; gap: 2px; font-size: 9.5pt; }
@@ -58,10 +81,7 @@
   button:hover:enabled { background: #81a2be; color: #1d1f21; }
   button:disabled { opacity: .5; cursor: default; }
 
-  .filelist { margin: 8px 0; font-size: 9.5pt; }
-  .frow { padding: 2px 0; }
-
-  .st { font-weight: bold; }
+  .st { font-weight: bold; font-size: 8pt; }
   .st.queued { color: #585858; }
   .st.processing { color: #f0c674; }
   .st.done { color: #b5bd68; }
@@ -85,25 +105,12 @@
 <body>
 
 <div id="nav">
-  [ <a href="https://boards.4chan.org/a/">a</a> /
-    <a href="https://boards.4chan.org/c/">c</a> /
-    <a href="https://boards.4chan.org/g/">g</a> /
-    <a href="https://boards.4chan.org/gd/">gd</a> /
-    <a href="https://boards.4chan.org/jp/">jp</a> /
-    <a href="https://boards.4chan.org/m/">m</a> /
-    <a href="https://boards.4chan.org/o/">o</a> /
-    <a href="https://boards.4chan.org/p/">p</a> /
-    <a href="https://boards.4chan.org/v/">v</a> /
-    <a href="https://boards.4chan.org/vg/">vg</a> /
-    <a href="https://boards.4chan.org/vr/">vr</a> /
-    <a href="https://boards.4chan.org/w/">w</a> /
-    <a href="https://boards.4chan.org/wg/">wg</a> ]
-  <span class="right"><a href="https://github.com/ArsVie/Multi-Modal-Manga-Translation-Pipeline">GitHub</a></span>
+  <a href="https://github.com/ArsVie/Multi-Modal-Manga-Translation-Pipeline">GitHub</a>
 </div>
 
 <div class="boardBanner">
   <div class="boardTitle">Manga Translation</div>
-  <div class="boardSubtitle">Upload Japanese pages — get English pages back. Powered by local models.</div>
+  <div class="boardSubtitle">Upload Japanese pages — get English pages back. Powered by Gemma-tan ♡ (◕ᴗ◕✿)</div>
 </div>
 
 <hr>
@@ -113,9 +120,10 @@
   <fieldset class="postform">
     <legend>Start a translation</legend>
 
-    <div class="dropzone" id="dropzone">Drop pages here or click to browse — PNG / JPG / WEBP, multiple allowed</div>
+    <div class="dropzone" id="dropzone">Drop pages here, click to browse, or paste with <kbd>Ctrl</kbd>+<kbd>V</kbd> — PNG / JPG / WEBP</div>
     <input type="file" id="file-input" multiple accept="image/jpeg,image/png,image/webp,image/bmp">
-    <div class="filelist" id="filelist"></div>
+    <div class="note" id="queue-note"></div>
+    <div class="thumbs" id="thumbs"></div>
 
     <fieldset class="adv">
       <legend>Advanced settings</legend>
@@ -134,7 +142,8 @@
         <label class="full">Description
           <textarea id="series-desc" rows="3" placeholder="One-paragraph plot summary — helps tone and character voices"></textarea>
         </label>
-        <label class="full">Custom names map (one <code>jp=English</code> per line, or comma-separated)
+        <label class="full">Custom names map
+          <small class="note">one <code>jp=English</code> per line, or comma-separated</small>
           <textarea id="custom-map" rows="4" placeholder="ルーグ=Lugh&#10;トウアハーデ=Tuatha Dé&#10;ディア=Dia"></textarea>
         </label>
         <label>Batch size (pages translated together)
@@ -159,16 +168,17 @@
 
 <script>
 (function () {
-  var files = [];
+  var items = [];   // [{ file: File, url: objectURL }]
   var $ = function (id) { return document.getElementById(id); };
-  var fileInput = $("file-input"), fileList = $("filelist"), button = $("translate-btn");
+  var fileInput = $("file-input"), thumbs = $("thumbs"), button = $("translate-btn");
   var globalStatus = $("global-status"), results = $("results"), dropzone = $("dropzone");
   var timer = null;
   var busy = false;
+  var holdStatusUntil = 0;  // keep the last result message visible
 
   // ---------- status banner ----------
   function refreshStatus() {
-    if (busy) return;
+    if (busy || Date.now() < holdStatusUntil) return;
     fetch("/status").then(function (r) { return r.json(); }).then(function (s) {
       var parts = [];
       parts.push(s.models_loaded ? "models loaded" : "models NOT loaded" + (s.load_error ? " — " + s.load_error : ""));
@@ -183,24 +193,113 @@
   refreshStatus();
   setInterval(refreshStatus, 15000);
 
-  // ---------- file selection ----------
+  // ---------- upload queue (thumbnails with controls) ----------
   function renderFiles() {
-    fileList.innerHTML = "";
-    files.forEach(function (f, i) {
-      var row = document.createElement("div");
-      row.className = "frow";
-      var st = document.createElement("span");
-      st.className = "st queued";
-      st.id = "st-" + i;
-      row.appendChild(st);
-      fileList.appendChild(row);
-      setStatus(i, "queued", "queued");
+    holdStatusUntil = 0;  // any queue change resumes the live status feed
+    thumbs.innerHTML = "";
+    items.forEach(function (it, i) {
+      var t = document.createElement("div");
+      t.className = "thumb";
+      t.draggable = true;
+      t.dataset.index = i;
+
+      var img = document.createElement("img");
+      img.className = "pic";
+      img.src = it.url;
+      img.alt = it.file.name;
+      t.appendChild(img);
+
+      var num = document.createElement("span");
+      num.className = "num";
+      num.textContent = i + 1;
+      t.appendChild(num);
+
+      var name = document.createElement("div");
+      name.className = "fname";
+      name.textContent = it.file.name;
+      name.title = it.file.name;
+      t.appendChild(name);
+
+      var meta = document.createElement("div");
+      meta.className = "fmeta";
+      meta.innerHTML = "<span>" + (it.file.size / 1024).toFixed(0) + " KB</span>" +
+                       '<span class="st queued" id="st-' + i + '">\u25A0 queued</span>';
+      t.appendChild(meta);
+
+      var ctl = document.createElement("div");
+      ctl.className = "fctl";
+      ctl.innerHTML =
+        '<button type="button" class="mv" title="Move left" ' + (i === 0 ? "disabled" : "") + '>&#9664;</button>' +
+        '<button type="button" class="mv" title="Move right" ' + (i === items.length - 1 ? "disabled" : "") + '>&#9654;</button>' +
+        '<button type="button" class="rm" title="Remove">&#10005;</button>';
+      ctl.children[0].addEventListener("click", function () { move(i, -1); });
+      ctl.children[1].addEventListener("click", function () { move(i, 1); });
+      ctl.children[2].addEventListener("click", function () { remove(i); });
+      t.appendChild(ctl);
+
+      // drag & drop reorder
+      t.addEventListener("dragstart", function (e) {
+        dragFrom = i;
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", String(i));
+      });
+      t.addEventListener("dragover", function (e) {
+        e.preventDefault();
+        t.classList.add("dragover");
+      });
+      t.addEventListener("dragleave", function () { t.classList.remove("dragover"); });
+      t.addEventListener("drop", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        t.classList.remove("dragover");
+        var from = Number(e.dataTransfer.getData("text/plain"));
+        if (isNaN(from) || from === i) return;
+        var moved = items.splice(from, 1)[0];
+        items.splice(i, 0, moved);
+        renderFiles();
+      });
+
+      thumbs.appendChild(t);
     });
-    button.disabled = files.length === 0;
+    $("queue-note").textContent = items.length
+      ? items.length + (items.length === 1 ? " page" : " pages") + " queued — reorder with \u25C0 \u25B6 or drag \u00B7 \u2715 removes"
+      : "";
+    button.disabled = items.length === 0;
+  }
+
+  var dragFrom = null;
+
+  function move(i, delta) {
+    var j = i + delta;
+    if (j < 0 || j >= items.length) return;
+    var tmp = items[i]; items[i] = items[j]; items[j] = tmp;
+    renderFiles();
+  }
+
+  function remove(i) {
+    if (items[i]) URL.revokeObjectURL(items[i].url);
+    items.splice(i, 1);
+    renderFiles();
+  }
+
+  function uniqueName(name) {
+    var dup = items.some(function (it) { return it.file.name === name; });
+    if (!dup) return name;
+    var dot = name.lastIndexOf(".");
+    var base = dot > 0 ? name.slice(0, dot) : name;
+    var ext = dot > 0 ? name.slice(dot) : "";
+    var n = 2;
+    while (items.some(function (it) { return it.file.name === base + "_" + n + ext; })) n++;
+    return base + "_" + n + ext;
   }
 
   function addFiles(list) {
-    files = files.concat(Array.prototype.slice.call(list));
+    Array.prototype.slice.call(list).forEach(function (f) {
+      if (!f || !(f.type.indexOf("image/") === 0 || /\.(png|jpe?g|webp|bmp)$/i.test(f.name))) return;
+      var name = uniqueName(f.name || ("pasted_" + Date.now() + ".png"));
+      var file = (name !== f.name) ? new File([f], name, { type: f.type }) : f;
+      items.push({ file: file, url: URL.createObjectURL(file) });
+    });
     renderFiles();
   }
 
@@ -214,12 +313,31 @@
   });
   fileInput.addEventListener("change", function () { addFiles(fileInput.files); fileInput.value = ""; });
 
+  // Ctrl+V paste anywhere on the page
+  document.addEventListener("paste", function (e) {
+    var list = (e.clipboardData && e.clipboardData.items) || [];
+    var imgs = [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].kind === "file" && list[i].type.indexOf("image/") === 0) {
+        var f = list[i].getAsFile();
+        if (f) imgs.push(f);
+      }
+    }
+    if (imgs.length) {
+      e.preventDefault();
+      addFiles(imgs);
+    }
+  });
+
+  // Dropping files outside the dropzone must not navigate the page away
+  window.addEventListener("dragover", function (e) { e.preventDefault(); });
+  window.addEventListener("drop", function (e) { e.preventDefault(); });
+
   function setStatus(i, cls, text) {
     var st = $("st-" + i);
-    if (!st || !files[i]) return;
-    var f = files[i];
+    if (!st) return;
     st.className = "st " + cls;
-    st.textContent = "\u25A0 " + (text || "") + " " + f.name + " (" + (f.size / 1024).toFixed(0) + " KB)";
+    st.textContent = text ? "\u25A0 " + text : "";
   }
 
   // ---------- advanced settings persistence ----------
@@ -328,9 +446,9 @@
   }
 
   button.addEventListener("click", function () {
-    if (!files.length) return;
+    if (!items.length) return;
     var fd = new FormData();
-    files.forEach(function (f) { fd.append("files", f, f.name); });
+    items.forEach(function (it) { fd.append("files", it.file, it.file.name); });
     fd.append("title", $("series-title").value);
     fd.append("tags", $("series-tags").value);
     fd.append("description", $("series-desc").value);
@@ -341,16 +459,17 @@
     fd.append("save_comparisons", $("save-comparisons").checked ? "true" : "false");
     fd.append("llm_base_url", $("llm-url").value.trim());
 
-    files.forEach(function (f, i) { setStatus(i, "processing", "processing…"); });
+    items.forEach(function (it, i) { setStatus(i, "processing", "processing…"); });
     button.disabled = true;
     busy = true;
+    holdStatusUntil = 0;
     results.innerHTML = "";
 
     var started = Date.now();
-    globalStatus.textContent = "Translating " + files.length + " page(s) — 0:00 elapsed";
+    globalStatus.textContent = "Translating " + items.length + " page(s) — 0:00 elapsed";
     globalStatus.style.color = "#f0c674";
     timer = setInterval(function () {
-      globalStatus.textContent = "Translating " + files.length + " page(s) — " +
+      globalStatus.textContent = "Translating " + items.length + " page(s) — " +
         fmtTime(Math.floor((Date.now() - started) / 1000)) + " elapsed";
     }, 1000);
 
@@ -371,14 +490,16 @@
         globalStatus.textContent = "Done — " + ok + "/" + body.pages.length + " page(s) translated in " +
           fmtTime(Math.floor((Date.now() - started) / 1000)) + ".";
         globalStatus.style.color = "#b5bd68";
+        holdStatusUntil = Date.now() + 5 * 60 * 1000;
         button.disabled = false;
         busy = false;
       })
       .catch(function (err) {
         clearInterval(timer);
-        files.forEach(function (f, i) { setStatus(i, "error", "failed"); });
+        items.forEach(function (it, i) { setStatus(i, "error", "failed"); });
         globalStatus.textContent = "Error: " + err.message;
         globalStatus.style.color = "#cc6666";
+        holdStatusUntil = Date.now() + 5 * 60 * 1000;
         button.disabled = false;
         busy = false;
       });
