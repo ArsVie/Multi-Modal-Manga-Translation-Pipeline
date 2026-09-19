@@ -9,7 +9,13 @@ import torch
 from PIL import Image, ImageDraw, ImageFont
 from ultralytics import YOLO
 from manga_ocr import MangaOcr
+from manga_ocr.ocr import post_process
 from simple_lama_inpainting import SimpleLama
+
+
+class _SchemaUnsupported(Exception):
+    """The LLM server rejected json_schema constrained decoding (400/422)."""
+
 
 class MangaTranslator:
     # Below this fraction of "edge ink" a text_bubble region is treated as a
@@ -53,6 +59,7 @@ class MangaTranslator:
         self.llm_model = llm_model
         self.api_key = api_key or None  # sent as "Authorization: Bearer <key>" when set
         self.llm_timeout = 240  # seconds per call; fail fast instead of burning 10-minute waits if the LLM server wedges
+        self._no_json_schema = False  # flipped on after a 400/422 from a server without schema support
         self.dic = pyphen.Pyphen(lang='en')
 
         # Font cache for performance
@@ -86,26 +93,47 @@ class MangaTranslator:
         if api_key is not None:
             self.api_key = api_key or None
 
-    def _chat(self, user_message, system_message=None, temperature=None):
-        """Send one chat completion request to the local OpenAI-compatible server."""
+    def _chat(self, user_message, system_message=None, temperature=None, response_format=None,
+              max_tokens=None):
+        """Send one chat completion request to the local OpenAI-compatible server.
+
+        response_format: optional constrained-decoding spec. llama.cpp's form is
+        {"type": "json_object", "schema": {...}}; a server that rejects it with
+        400/422 raises _SchemaUnsupported so the caller can retry without it.
+
+        max_tokens: optional cap on generated tokens. Small finetuned models can
+        miss EOS after a completed JSON array and ramble to the context limit,
+        burning the whole read timeout — the cap bounds that failure mode.
+        """
         messages = []
         if system_message:
             messages.append({"role": "system", "content": system_message})
         messages.append({"role": "user", "content": user_message})
 
+        body = {
+            "model": self.llm_model,
+            "messages": messages,
+            "temperature": 0.3 if temperature is None else temperature,
+            "stream": False,
+        }
+        if response_format is not None:
+            body["response_format"] = response_format
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
+
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else None
         response = requests.post(
             f"{self.llm_base_url}/v1/chat/completions",
-            json={
-                "model": self.llm_model,
-                "messages": messages,
-                "temperature": 0.3 if temperature is None else temperature,
-                "stream": False,
-            },
+            json=body,
             headers=headers,
             timeout=self.llm_timeout,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            if response_format is not None and response.status_code in (400, 422):
+                raise _SchemaUnsupported(f"HTTP {response.status_code}: {response.text[:160]}") from exc
+            raise
         return response.json()["choices"][0]["message"]["content"]
 
     def _get_font(self, size):
@@ -537,27 +565,79 @@ class MangaTranslator:
                 
             return image, manga_data
 
+    def _ocr_batch(self, images):
+        """One generate() call for many crops. manga-ocr resizes every crop to
+        the same fixed tensor, so they stack without padding; output text is
+        bit-identical to the per-crop path."""
+        prepped = [self.mocr._preprocess(im.convert("L").convert("RGB")) for im in images]
+        pixel_values = torch.stack(prepped).to(self.mocr.model.device)
+        with torch.no_grad():
+            out = self.mocr.model.generate(pixel_values, max_length=300)
+        return [post_process(self.mocr.tokenizer.decode(o.cpu(), skip_special_tokens=True))
+                for o in out]
+
     def run_ocr(self, manga_data, upscale_small_crops=True):
+        """OCR every crop of a page. All crops go through one batched model call
+        (falls back to per-crop calls if the batch fails)."""
+        crops = []
         for entry in manga_data:
-            crop_path = entry['crop_path']
-            crop = cv2.imread(crop_path)
+            crop = cv2.imread(entry['crop_path'])
             if crop is None:
-                entry['original_text'] = ""
+                crops.append(None)
                 continue
 
             # The OCR model reads small crops better when upscaled
             if upscale_small_crops and max(crop.shape[:2]) < 300:
                 crop = cv2.resize(crop, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+            crops.append(Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)))
 
-            japanese_text = self.mocr(
-                Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-            )
+        texts = [None] * len(crops)
+        pending = [i for i, c in enumerate(crops) if c is not None]
+        if pending:
+            try:
+                for i, text in zip(pending, self._ocr_batch([crops[i] for i in pending])):
+                    texts[i] = text
+            except Exception as exc:  # e.g. CUDA OOM — keep a safe fallback path
+                print(f"  ⚠ batched OCR failed ({exc}); falling back to per-crop OCR")
+                for i in pending:
+                    texts[i] = self.mocr(crops[i])
 
+        for entry, text in zip(manga_data, texts):
+            if text is None:
+                entry['original_text'] = ""
+                continue
             # Apply custom translations to original text
-            japanese_text = self._apply_custom_translations(japanese_text)
-
-            entry['original_text'] = japanese_text.replace('\n', '')
+            text = self._apply_custom_translations(text)
+            entry['original_text'] = text.replace('\n', '')
         return manga_data
+
+    def _translation_schema(self, entries):
+        """Schema-constrained decoding spec for one chunk: a JSON array with
+        exactly one {bubble_id, translation} per requested bubble. Servers
+        without json_schema support get None (plain call)."""
+        if self._no_json_schema:
+            return None
+        ids = [e["id"] for e in entries]
+        return {
+            # NB: our llama.cpp builds enforce the grammar under the
+            # "json_object"+schema form; "type":"json_schema" there returns a
+            # single object instead of the root array (verified empirically).
+            "type": "json_object",
+            "schema": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "bubble_id": {"type": "string", "enum": ids},
+                        "translation": {"type": "string"},
+                    },
+                    "required": ["bubble_id", "translation"],
+                    "additionalProperties": False,
+                },
+                "minItems": len(ids),
+                "maxItems": len(ids),
+            },
+        }
 
     def _translate_chunk(self, entries, context_str, system_prompt, depth=0):
         """One batch LLM call for a group of bubbles -> {bubble_id: translation}.
@@ -567,10 +647,21 @@ class MangaTranslator:
         never used. Transport errors propagate to the caller (fail fast).
         """
         payload = [{"bubble_id": e["id"], "text": e["original_text"]} for e in entries]
-        content = self._chat(
-            "Translate this JSON array:\n" + json.dumps(payload, ensure_ascii=False),
-            system_message=system_prompt,
-        ).strip()
+        user_msg = "Translate this JSON array:\n" + json.dumps(payload, ensure_ascii=False)
+        try:
+            content = self._chat(
+                user_msg,
+                system_message=system_prompt,
+                response_format=self._translation_schema(entries),
+                max_tokens=32 * len(entries) + 96,
+            ).strip()
+        except _SchemaUnsupported as exc:
+            # Server without schema support: remember and continue plain — the
+            # parse + re-ask logic below still guards correctness.
+            print(f"  \u26a0 json_schema unsupported ({exc}); continuing without it")
+            self._no_json_schema = True
+            content = self._chat(user_msg, system_message=system_prompt,
+                                 max_tokens=32 * len(entries) + 96).strip()
 
         # Model may wrap the array in prose or code fences; slice out the array.
         if "```" in content:
@@ -616,7 +707,7 @@ class MangaTranslator:
             mapping.update(self._translate_chunk(missing[mid:], context_str, system_prompt, depth + 1))
         return mapping
 
-    def translate_batch(self, manga_data, series_info=None):
+    def translate_batch(self, manga_data, series_info=None, max_chunk=24):
         valid_entries = [e for e in manga_data if e['original_text'].strip()]
         if not valid_entries:
             return manga_data
@@ -648,7 +739,6 @@ Description: {series_info.get('description', 'None')}
         # long LLM responses that go malformed more easily. Malformed or partial
         # responses are re-asked in smaller batches (context preserved) —
         # never one-LLM-call-per-bubble.
-        max_chunk = 24
         chunks = [valid_entries[i:i + max_chunk] for i in range(0, len(valid_entries), max_chunk)]
         translation_map = {}
         try:
@@ -703,21 +793,24 @@ Description: {series_info.get('description', 'None')}
 
 
 
-    def clean_page(self, original_image, page_data, inpaint_radius=5):
+    def clean_page(self, original_image, page_data, inpaint_radius=5, free_mode="crop"):
             """
             Strict Hybrid Cleaning:
             - bubble: OpenCV inpainting of text ink that is NOT connected to the
               crop border (outlines and tails are preserved, corner glyphs are
               cleaned too)
             - box:    same, plus a 3px rim so rectangular borders survive
-            - free:   LaMa inpainting on a rectangle mask (redraws background)
+            - free:   LaMa inpainting on a padded crop
+                      (free_mode="page" keeps the legacy full-page pass)
             """
             final_image = original_image.copy()
             h, w = original_image.shape[:2]
 
-            # Mask for LaMa (Accumulates all 'text_free' areas)
+            # Mask for LaMa (Accumulates all 'text_free' areas) — legacy
+            # free_mode="page" path only; the crop path collects rects instead.
             lama_mask = np.zeros((h, w), dtype=np.uint8)
             has_lama_work = False
+            free_crop_jobs = []
 
             for entry in page_data:
                 # Skip if no translation (optional, but good for speed)
@@ -780,40 +873,72 @@ Description: {series_info.get('description', 'None')}
                     # Paste back
                     final_image[y1:y2, x1:x2] = cleaned_crop
 
-                # --- STRATEGY 2: FREE TEXT (LaMa + Rectangle) ---
+                # --- STRATEGY 2: FREE TEXT (LaMa / flat fill) ---
                 elif shape == 'free':
                     # Keep a small rim when nothing touches the crop edge, so a
                     # faint box border around free text is not painted over
                     inset = 4 if (entry.get('edge_ink') or 0) < 0.05 else 0
-                    cv2.rectangle(lama_mask, (x1 + inset, y1 + inset),
-                                  (x2 - inset, y2 - inset), 255, -1)
-                    has_lama_work = True
+                    rect = (x1 + inset, y1 + inset, x2 - inset, y2 - inset)
+                    if free_mode == "page":
+                        cv2.rectangle(lama_mask, rect[:2], rect[2:], 255, -1)
+                        has_lama_work = True
+                    else:
+                        free_crop_jobs.append(rect)
 
-            # Run LaMa batch for all free text found
-            if has_lama_work:
-                # Dilate LaMa mask slightly
-                lama_kernel = np.ones((5, 5), np.uint8)
-                lama_mask = cv2.dilate(lama_mask, lama_kernel, iterations=1)
+            # Free text: legacy one full-page LaMa pass, or per-region crops
+            if free_mode == "page":
+                if has_lama_work:
+                    # Dilate LaMa mask slightly
+                    lama_kernel = np.ones((5, 5), np.uint8)
+                    lama_mask = cv2.dilate(lama_mask, lama_kernel, iterations=1)
 
-                img_pil = Image.fromarray(cv2.cvtColor(final_image, cv2.COLOR_BGR2RGB))
-                mask_pil = Image.fromarray(lama_mask)
+                    img_pil = Image.fromarray(cv2.cvtColor(final_image, cv2.COLOR_BGR2RGB))
+                    mask_pil = Image.fromarray(lama_mask)
 
-                try:
-                    # 1. Run Model (PIL in, PIL out)
-                    result = self.lama(img_pil, mask_pil)
-                    cleaned_lama = cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
+                    try:
+                        # 1. Run Model (PIL in, PIL out)
+                        result = self.lama(img_pil, mask_pil)
+                        cleaned_lama = cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
 
-                    # 2. Resize fix (LaMa padding issue)
-                    if cleaned_lama.shape[:2] != (h, w):
-                        cleaned_lama = cv2.resize(cleaned_lama, (w, h))
+                        # 2. Resize fix (LaMa padding issue)
+                        if cleaned_lama.shape[:2] != (h, w):
+                            cleaned_lama = cv2.resize(cleaned_lama, (w, h))
 
-                    # 3. Merge LaMa result
-                    final_image = np.where(lama_mask[:, :, None] == 255, cleaned_lama, final_image)
+                        # 3. Merge LaMa result
+                        final_image = np.where(lama_mask[:, :, None] == 255, cleaned_lama, final_image)
 
-                except Exception as e:
-                    print(f"    ⚠ LaMa failed: {e}")
+                    except Exception as e:
+                        print(f"    ⚠ LaMa failed: {e}")
+            else:
+                for rect in free_crop_jobs:
+                    self._lama_crop(final_image, rect)
 
             return final_image
+
+    def _lama_crop(self, image, rect, pad=48):
+        """Inpaint one region with LaMa on a padded crop and paste it back.
+
+        Much cheaper than a full-page pass; the padding gives LaMa enough
+        context. `image` is modified in place (crop is a numpy view)."""
+        x1, y1, x2, y2 = rect
+        h, w = image.shape[:2]
+        x1p, y1p = max(0, x1 - pad), max(0, y1 - pad)
+        x2p, y2p = min(w, x2 + pad), min(h, y2 + pad)
+        crop = image[y1p:y2p, x1p:x2p]
+        mask = np.zeros(crop.shape[:2], dtype=np.uint8)
+        cv2.rectangle(mask, (x1 - x1p, y1 - y1p), (x2 - x1p, y2 - y1p), 255, -1)
+        mask = cv2.dilate(mask, np.ones((5, 5), np.uint8), iterations=1)
+        img_pil = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+        try:
+            result = self.lama(img_pil, Image.fromarray(mask))
+        except Exception as e:
+            print(f"    ⚠ LaMa crop failed: {e}")
+            return
+        cleaned = cv2.cvtColor(np.array(result), cv2.COLOR_RGB2BGR)
+        if cleaned.shape[:2] != crop.shape[:2]:
+            cleaned = cv2.resize(cleaned, (crop.shape[1], crop.shape[0]))
+        m = mask == 255
+        crop[m] = cleaned[m]
 
     def _render_page(self, original_image, manga_data, cleaning="lama"):
         """Clean the page, then draw the translated text.
@@ -870,15 +995,20 @@ Description: {series_info.get('description', 'None')}
         final_img = self._render_page(original_image, manga_data)
         cv2.imwrite(output_path, final_img)
         print(f"  Saved: {output_path}")
+        return final_img
 
-    def save_comparison(self, original_image, manga_data, output_path,
+    def save_comparison(self, original_image, manga_data, output_path, translated_panel=None,
                         labels=("Not translated", "Translated", "Translated + LaMa inpainting")):
         """Save a 3-panel sheet: the original page, the page translated with the
-        legacy blur cleanup, and the full pipeline output (OpenCV + LaMa)."""
+        legacy blur cleanup, and the full pipeline output (OpenCV + LaMa).
+
+        translated_panel: an already-rendered pipeline output to reuse (skips a
+        second cleaning pass, incl. LaMa); rendered here when None."""
         panels = [
             original_image,
             self._render_page(original_image, manga_data, cleaning="blur"),
-            self._render_page(original_image, manga_data, cleaning="lama"),
+            translated_panel if translated_panel is not None
+            else self._render_page(original_image, manga_data, cleaning="lama"),
         ]
         pil_panels = [Image.fromarray(cv2.cvtColor(p, cv2.COLOR_BGR2RGB)) for p in panels]
 
@@ -1005,14 +1135,15 @@ Description: {series_info.get('description', 'None')}
                     page_data = [d for d in batch_data if d.get('page_id') == page_id]
 
                     try:
-                        self.typeset(img, page_data, output_path)
+                        final_img = self.typeset(img, page_data, output_path)
 
                         if save_comparisons:
                             stem = os.path.splitext(filename)[0]
                             comparison_path = os.path.join(
                                 output_folder, f"{stem}_comparison.png"
                             )
-                            self.save_comparison(img, page_data, comparison_path)
+                            self.save_comparison(img, page_data, comparison_path,
+                                                 translated_panel=final_img)
                     except Exception as e:
                         print(f"    Error typesetting {filename}: {e}")
 

@@ -78,8 +78,8 @@ def main():
     img, data = t.detect_and_process(str(page), output_dir=str(out), page_id="p001")
     data = t.run_ocr(data)
     data = t.translate_batch(data)
-    t.typeset(img, data, str(out / "translated.jpg"))
-    t.save_comparison(img, data, str(out / "comparison.png"))
+    final_img = t.typeset(img, data, str(out / "translated.jpg"))
+    t.save_comparison(img, data, str(out / "comparison.png"), translated_panel=final_img)
     done = sum(1 for e in data if e.get("translated_text"))
     print(f"\u2713 done: {done}/{len(data)} bubbles translated "
           f"-> smoke_out/translated.jpg + comparison.png")
