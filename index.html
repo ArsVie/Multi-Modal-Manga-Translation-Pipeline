@@ -75,13 +75,13 @@
   /* -------- experimental: names & terms tables -------- */
   .expwrap { display: flex; flex-direction: column; gap: 10px; }
   .exprow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .tblblk { display: flex; flex-direction: column; gap: 4px; }
+  .tblblk { display: flex; flex-direction: column; gap: 4px; max-width: 580px; }
   .tblhead { display: flex; align-items: center; gap: 8px; font-weight: bold; }
   .tblhead .note { font-weight: normal; }
   .tbl { display: grid; gap: 6px; align-items: center; }
   .tbl > * { min-width: 0; }
-  .tbl.names { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.15fr) 84px 30px; }
-  .tbl.terms { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.15fr) 84px 30px; }
+  .tbl.names { grid-template-columns: minmax(0, 200px) minmax(0, 250px) 84px 28px; }
+  .tbl.terms { grid-template-columns: minmax(0, 200px) minmax(0, 250px) 84px 28px; }
   .tbl .hdr { font-size: 9pt; color: #9aa1a8; }
   .tbl input, .tbl select { width: 100%; }
   .tbl button { padding: 2px 0; font-size: 9.5pt; }
