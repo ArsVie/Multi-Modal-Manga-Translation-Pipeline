@@ -41,11 +41,30 @@
     .wide .gallery { position: static; }
   }
 
-  fieldset.postform, fieldset.adv {
+  fieldset.postform, fieldset.adv, details.adv {
     background: #282a2e; border: 1px solid #282a2e; padding: 8px 10px; margin: 12px 0;
   }
-  fieldset.adv { margin: 10px 0 6px; }
+  fieldset.adv, details.adv { margin: 10px 0 6px; }
   fieldset.postform > legend, fieldset.adv > legend { color: #b294bb; font-weight: bold; padding: 0 4px; }
+  details.adv > summary { color: #b294bb; font-weight: bold; padding: 0 4px; cursor: pointer;
+                          user-select: none; -webkit-user-select: none; }
+  details.adv[open] > summary { margin-bottom: 6px; }
+  details.adv > summary::marker { color: #b294bb; }
+
+  /* -------- experimental: names & terms tables -------- */
+  .expwrap { display: flex; flex-direction: column; gap: 10px; }
+  .exprow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .tblblk { display: flex; flex-direction: column; gap: 4px; }
+  .tblhead { display: flex; align-items: center; gap: 8px; font-weight: bold; }
+  .tblhead .note { font-weight: normal; }
+  .tbl { display: grid; gap: 4px; align-items: center; }
+  .tbl > * { min-width: 0; }
+  .tbl.names { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.15fr) 84px 30px; }
+  .tbl.terms { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.3fr) 30px; }
+  .tbl .hdr { font-size: 8.5pt; color: #969896; }
+  .tbl input, .tbl select { width: 100%; }
+  .tbl button { padding: 2px 0; font-size: 9.5pt; }
+  button.mini { padding: 1px 9px; font-size: 11pt; line-height: 1.25; }
 
   input[type=text], input[type=number], textarea, select {
     background: #1d1f21; color: #c5c8c6; border: 1px solid #3a3d42;
@@ -158,8 +177,8 @@
     <div class="note" id="queue-note"></div>
     <div class="thumbs" id="thumbs"></div>
 
-    <fieldset class="adv">
-      <legend>Advanced settings</legend>
+    <details class="adv" id="adv-box">
+      <summary>Advanced settings</summary>
       <div class="advgrid">
         <label>LLM server
           <select id="llm-preset">
@@ -179,10 +198,6 @@
         <label class="full">Description
           <textarea id="series-desc" rows="3" placeholder="One-paragraph plot summary — helps tone and character voices"></textarea>
         </label>
-        <label class="full">Custom names map
-          <small class="note">one <code>jp=English</code> per line, or comma-separated</small>
-          <textarea id="custom-map" rows="4" placeholder="ルーグ=Lugh&#10;トウアハーデ=Tuatha Dé&#10;ディア=Dia"></textarea>
-        </label>
         <label>Batch size (pages translated together)
           <input type="number" id="batch-size" value="4" min="1" max="16">
         </label>
@@ -192,10 +207,31 @@
         <label>Lettering size (1.0 = default, lower = smaller)
           <input type="number" id="font-scale" value="1.0" min="0.5" max="1.0" step="0.05">
         </label>
-        <label class="check"><input type="checkbox" id="keep-honorifics"> Keep honorifics (-san, -chan…)</label>
         <label class="check"><input type="checkbox" id="save-comparisons" checked> Show comparison sheet (Original / Translated / Translated + LaMa)</label>
       </div>
-    </fieldset>
+    </details>
+
+    <details class="adv" id="exp-box">
+      <summary>Experimental</summary>
+      <div class="expwrap">
+        <div class="exprow">
+          <button type="button" id="automap-btn" disabled>Automatically Map Terms and Names</button>
+          <span class="note" id="automap-status"></span>
+        </div>
+        <div class="tblblk">
+          <div class="tblhead">Names <span class="note">(characters — the pronoun guides the translator)</span>
+            <button type="button" class="mini" id="names-add" title="Add a name row">+</button></div>
+          <div class="tbl names" id="names-tbl"></div>
+        </div>
+        <div class="tblblk">
+          <div class="tblhead">Terms <span class="note">(places, groups, techniques)</span>
+            <button type="button" class="mini" id="terms-add" title="Add a term row">+</button></div>
+          <div class="tbl terms" id="terms-tbl"></div>
+        </div>
+        <label class="check"><input type="checkbox" id="keep-honorifics"> Keep honorifics (-san, -chan…)</label>
+        <div class="note">Empty English cells are ignored. Filled rows apply before translation and are saved per series (once a title is set) — between chapters you only add what's new.</div>
+      </div>
+    </details>
 
     <div style="margin-top: 6px;">
       <button id="translate-btn" disabled>Translate</button>
@@ -433,6 +469,7 @@
         " \u2014 reorder with \u25C0 \u25B6 or drag \u00B7 \u2715 removes";
     }
     button.disabled = items.length === 0;
+    updateAutomapBtn();
   }
 
   var dragFrom = null;
@@ -580,15 +617,275 @@
     st.textContent = text ? "\u25A0 " + text : "";
   }
 
+  // ---------- experimental: names & terms tables ----------
+  var namesRows = [];  // [{ jp, en, pr }]
+  var termsRows = [];  // [{ jp, en }]
+  var PRONOUN_CHOICES = ["", "he", "she", "they", "it"];
+  var tblSaveTimer = null;
+
+  function tableDirty() {
+    clearTimeout(tblSaveTimer);
+    tblSaveTimer = setTimeout(saveSettings, 300);
+  }
+
+  function mkCellInput(value, placeholder, cls) {
+    var input = document.createElement("input");
+    input.type = "text";
+    input.value = value || "";
+    if (placeholder) input.placeholder = placeholder;
+    if (cls) input.className = cls;
+    return input;
+  }
+
+  function mkRowRemove(rows, index, render) {
+    var rm = document.createElement("button");
+    rm.type = "button";
+    rm.className = "rm";
+    rm.title = "Remove row";
+    rm.textContent = "\u2715";
+    rm.addEventListener("click", function () {
+      rows.splice(index, 1);
+      render();
+      tableDirty();
+    });
+    return rm;
+  }
+
+  function mkHeader(cells) {
+    return cells.map(function (text) {
+      var span = document.createElement("span");
+      span.className = "hdr";
+      span.textContent = text;
+      return span;
+    });
+  }
+
+  function renderNames() {
+    var table = $("names-tbl");
+    table.innerHTML = "";
+    mkHeader(["JP (as OCR'd)", "English / romaji", "Pronoun", ""]).forEach(function (node) {
+      table.appendChild(node);
+    });
+    namesRows.forEach(function (row, i) {
+      var jp = mkCellInput(row.jp, "日本語", "jp");
+      jp.addEventListener("input", function () { row.jp = this.value; tableDirty(); });
+      var en = mkCellInput(row.en, "English", "en");
+      en.addEventListener("input", function () { row.en = this.value; tableDirty(); });
+      var pr = document.createElement("select");
+      PRONOUN_CHOICES.forEach(function (choice) {
+        var opt = document.createElement("option");
+        opt.value = choice;
+        opt.textContent = choice || "—";
+        pr.appendChild(opt);
+      });
+      pr.value = row.pr || "";
+      pr.addEventListener("change", function () { row.pr = this.value; tableDirty(); });
+      table.appendChild(jp);
+      table.appendChild(en);
+      table.appendChild(pr);
+      table.appendChild(mkRowRemove(namesRows, i, renderNames));
+    });
+  }
+
+  function renderTerms() {
+    var table = $("terms-tbl");
+    table.innerHTML = "";
+    mkHeader(["JP (as OCR'd)", "English", ""]).forEach(function (node) {
+      table.appendChild(node);
+    });
+    termsRows.forEach(function (row, i) {
+      var jp = mkCellInput(row.jp, "日本語", "jp");
+      jp.addEventListener("input", function () { row.jp = this.value; tableDirty(); });
+      var en = mkCellInput(row.en, "English", "en");
+      en.addEventListener("input", function () { row.en = this.value; tableDirty(); });
+      table.appendChild(jp);
+      table.appendChild(en);
+      table.appendChild(mkRowRemove(termsRows, i, renderTerms));
+    });
+  }
+
+  function focusLast(tableId) {
+    var inputs = $(tableId).querySelectorAll("input.jp");
+    if (inputs.length) inputs[inputs.length - 1].focus();
+  }
+
+  $("names-add").addEventListener("click", function () {
+    namesRows.push({ jp: "", en: "", pr: "" });
+    renderNames();
+    focusLast("names-tbl");
+    tableDirty();
+  });
+  $("terms-add").addEventListener("click", function () {
+    termsRows.push({ jp: "", en: "" });
+    renderTerms();
+    focusLast("terms-tbl");
+    tableDirty();
+  });
+
+  // Serialize the tables for the pipeline: jp=English lines go out as
+  // custom_translations; English=pronoun lines as pronouns. Empty cells skip.
+  function tablesMap() {
+    var lines = [];
+    namesRows.concat(termsRows).forEach(function (row) {
+      var jp = (row.jp || "").trim(), en = (row.en || "").trim();
+      if (jp && en) lines.push(jp + "=" + en);
+    });
+    return lines.join("\n");
+  }
+  function tablesPronouns() {
+    var lines = [];
+    namesRows.forEach(function (row) {
+      var en = (row.en || "").trim(), pr = (row.pr || "").trim();
+      if (en && pr) lines.push(en + "=" + pr);
+    });
+    return lines.join("\n");
+  }
+
+  // Fold an extraction draft into the tables: existing rows win (your edits
+  // stay), genuinely new names/terms are appended. Returns [new, newTerms].
+  function mergeDraft(items) {
+    var seen = {};
+    namesRows.concat(termsRows).forEach(function (row) {
+      if (row.jp) seen[row.jp] = 1;
+    });
+    var addedNames = 0, addedTerms = 0;
+    (items || []).forEach(function (item) {
+      var jp = (item.jp || "").trim(), en = (item.en || "").trim();
+      if (!jp || seen[jp]) return;
+      seen[jp] = 1;
+      if (item.kind === "character") {
+        namesRows.push({ jp: jp, en: en, pr: (item.pronoun || "").trim() });
+        addedNames++;
+      } else {
+        termsRows.push({ jp: jp, en: en });
+        addedTerms++;
+      }
+    });
+    if (addedNames) renderNames();
+    if (addedTerms) renderTerms();
+    tableDirty();
+    return [addedNames, addedTerms];
+  }
+
+  // ---------- experimental: "Automatically Map" button ----------
+  var automapBusy = false;
+  function updateAutomapBtn() {
+    $("automap-btn").disabled = automapBusy || busy || !items.length;
+  }
+  $("automap-btn").addEventListener("click", function () {
+    if (!items.length || automapBusy || busy) return;
+    var fd = new FormData();
+    items.forEach(function (it) { fd.append("files", it.file, it.file.name); });
+    fd.append("conf_threshold", $("conf").value);
+    fd.append("llm_base_url", $("llm-url").value.trim());
+    fd.append("api_key", $("llm-key").value.trim());
+    fd.append("llm_model", $("llm-model").value.trim());
+    automapBusy = true;
+    $("exp-box").open = true;
+    var status = $("automap-status");
+    status.textContent = "scanning " + items.length + " item(s) — OCR + name extraction\u2026";
+    status.style.color = "#f0c674";
+    updateAutomapBtn();
+    fetch("/suggest-names", { method: "POST", body: fd })
+      .then(function (r) {
+        return r.json().then(function (body) {
+          if (!r.ok) throw new Error(body.detail || ("HTTP " + r.status));
+          return body;
+        });
+      })
+      .then(function (body) {
+        var added = mergeDraft(body.items);
+        status.textContent = "found " + body.items.length + " item(s) in " + body.pages +
+          " page(s) (" + body.bubbles + " bubbles) — added " +
+          added[0] + " name(s), " + added[1] + " term(s)";
+        status.style.color = "#b5bd68";
+        seriesSaveToCache();
+      })
+      .catch(function (err) {
+        status.textContent = "extraction failed: " + err.message;
+        status.style.color = "#cc6666";
+      })
+      .then(function () {
+        automapBusy = false;
+        updateAutomapBtn();
+      });
+  });
+
+  // ---------- experimental: per-series config cache ----------
+  var seriesTitleEl = $("series-title");
+  function currentTitle() {
+    return seriesTitleEl.value.trim();
+  }
+  function seriesSaveToCache() {
+    var title = currentTitle();
+    if (!title) return;
+    var body = {
+      title: title,
+      names: namesRows.filter(function (row) { return (row.jp || "").trim(); }),
+      terms: termsRows.filter(function (row) { return (row.jp || "").trim(); }),
+      tags: $("series-tags").value,
+      description: $("series-desc").value
+    };
+    fetch("/series-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).catch(function () { /* the cache is best-effort */ });
+  }
+  function seriesLoadFromCache() {
+    var title = currentTitle();
+    if (!title) return;
+    fetch("/series-config?title=" + encodeURIComponent(title))
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (cfg) {
+        if (!cfg) return;
+        namesRows = (cfg.names || []).map(function (row) {
+          return { jp: row.jp || "", en: row.en || "", pr: row.pr || "" };
+        });
+        termsRows = (cfg.terms || []).map(function (row) {
+          return { jp: row.jp || "", en: row.en || "" };
+        });
+        if (!$("series-tags").value.trim() && cfg.tags) $("series-tags").value = cfg.tags;
+        if (!$("series-desc").value.trim() && cfg.description) $("series-desc").value = cfg.description;
+        renderNames();
+        renderTerms();
+        tableDirty();
+      })
+      .catch(function () { /* no cached config — keep what we have */ });
+  }
+  seriesTitleEl.addEventListener("change", function () { seriesLoadFromCache(); });
+
+  // ---------- collapsible sections remember their open/closed state ----------
+  var SECTION_IDS = ["adv-box", "exp-box"];
+  function saveSections() {
+    var state = {};
+    SECTION_IDS.forEach(function (id) { state[id] = $(id).open; });
+    localStorage.setItem("manga-sections", JSON.stringify(state));
+  }
+  (function restoreSections() {
+    var state = null;
+    try { state = JSON.parse(localStorage.getItem("manga-sections") || "null"); } catch (e) { state = null; }
+    $("adv-box").open = state ? !!state["adv-box"] : true;   // first run: keep Advanced visible
+    $("exp-box").open = state ? !!state["exp-box"] : false;
+    SECTION_IDS.forEach(function (id) {
+      $(id).addEventListener("toggle", saveSections);
+      // Some engines do not emit `toggle`; a click fallback still records state.
+      $(id).querySelector("summary").addEventListener("click", function () {
+        setTimeout(saveSections, 0);
+      });
+    });
+  })();
+
   // ---------- advanced settings persistence ----------
   var fields = ["llm-preset", "llm-url", "llm-key", "llm-model", "series-title", "series-tags", "series-desc",
-                "custom-map", "batch-size", "conf", "font-scale", "keep-honorifics", "save-comparisons"];
+                "batch-size", "conf", "font-scale", "keep-honorifics", "save-comparisons"];
   function saveSettings() {
     var data = {};
     fields.forEach(function (id) {
       var el = $(id);
       data[id] = el.type === "checkbox" ? el.checked : el.value;
     });
+    data.tables = { names: namesRows, terms: termsRows };
     localStorage.setItem("manga-settings", JSON.stringify(data));
   }
   function loadSettings() {
@@ -601,9 +898,31 @@
         if (!(id in data)) return;
         if (el.type === "checkbox") el.checked = data[id]; else el.value = data[id];
       });
+      var tb = data.tables;
+      if (tb && (tb.names || tb.terms)) {
+        namesRows = (tb.names || []).map(function (row) {
+          return { jp: row.jp || "", en: row.en || "", pr: row.pr || "" };
+        });
+        termsRows = (tb.terms || []).map(function (row) {
+          return { jp: row.jp || "", en: row.en || "" };
+        });
+      } else if (typeof data["custom-map"] === "string" && data["custom-map"].trim()) {
+        // Migrate the retired single-textarea map into rows (once).
+        data["custom-map"].split(/[\n,]/).forEach(function (chunk) {
+          chunk = chunk.trim();
+          if (!chunk || chunk.charAt(0) === "#" || chunk.indexOf("=") === -1) return;
+          var jp = chunk.slice(0, chunk.indexOf("=")).trim();
+          var en = chunk.slice(chunk.indexOf("=") + 1).trim();
+          if (jp) namesRows.push({ jp: jp, en: en, pr: "" });
+        });
+      }
     } catch (e) { /* ignore corrupt settings */ }
   }
   loadSettings();
+  renderNames();
+  renderTerms();
+  if (!namesRows.length && !termsRows.length) seriesLoadFromCache();
+  updateAutomapBtn();
   fields.forEach(function (id) { $(id).addEventListener("change", saveSettings); });
 
   $("llm-preset").addEventListener("change", function () {
@@ -728,7 +1047,8 @@
     fd.append("title", $("series-title").value);
     fd.append("tags", $("series-tags").value);
     fd.append("description", $("series-desc").value);
-    fd.append("custom_translations", $("custom-map").value);
+    fd.append("custom_translations", tablesMap());
+    fd.append("pronouns", tablesPronouns());
     fd.append("keep_honorifics", $("keep-honorifics").checked ? "true" : "false");
     fd.append("conf_threshold", $("conf").value);
     fd.append("batch_size", $("batch-size").value);
@@ -737,6 +1057,7 @@
     fd.append("llm_base_url", $("llm-url").value.trim());
     fd.append("api_key", $("llm-key").value.trim());
     fd.append("llm_model", $("llm-model").value.trim());
+    seriesSaveToCache();  // remember this series' names/terms for the next chapter
 
     items.forEach(function (it, i) { setStatus(i, "processing", "processing…"); });
     button.disabled = true;
@@ -791,6 +1112,7 @@
         holdStatusUntil = Date.now() + 5 * 60 * 1000;
         button.disabled = false;
         busy = false;
+        updateAutomapBtn();
       })
       .catch(function (err) {
         clearInterval(timer);
@@ -802,6 +1124,7 @@
         holdStatusUntil = Date.now() + 5 * 60 * 1000;
         button.disabled = false;
         busy = false;
+        updateAutomapBtn();
       });
   });
 })();

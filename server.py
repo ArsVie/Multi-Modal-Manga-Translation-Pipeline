@@ -4,6 +4,8 @@ Endpoints:
     GET  /          -> the web UI (index.html)
     GET  /status    -> readiness of the pipeline and the local LLM server
     POST /translate -> upload manga pages, get translated images back (base64)
+    POST /suggest-names -> OCR the pages and draft a names/terms list (LLM)
+    GET/POST /series-config -> per-series names/terms cache (keyed by title)
 
 Run:
     uvicorn server:app --host 0.0.0.0 --port 8000
@@ -11,6 +13,7 @@ Run:
 
 import base64
 import io
+import json
 import os
 import re
 import shutil
@@ -19,16 +22,21 @@ import threading
 import time
 import zipfile
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 import requests
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
 from MangaTranslator import MangaTranslator
 
 BASE_DIR = Path(__file__).resolve().parent
+
+# Per-series config cache (names/terms/pronouns), keyed by a slug of the title.
+SERIES_DIR = BASE_DIR / "series_cache"
 
 # Model assets. Override with environment variables if they live elsewhere.
 YOLO_MODEL = os.getenv("YOLO_MODEL", str(BASE_DIR / "comic-speech-bubble-detector.pt"))
@@ -127,6 +135,19 @@ def _llm_state(base_url, api_key=None):
         return "unreachable"
 
 
+def _require_llm(base_url, api_key=""):
+    """Raise a helpful 503 unless the LLM endpoint answers."""
+    state = _llm_state(base_url, api_key=api_key.strip() or None)
+    if state != "ready":
+        detail = {
+            "unreachable": f"LLM server at {base_url} is not reachable. Start it first "
+                           f"(see README: 'Local LLM server') or check the base URL.",
+            "loading": f"LLM server at {base_url} is still loading its model. Try again in a minute.",
+            "auth": f"LLM server at {base_url} rejected the API key — check the API key field.",
+        }.get(state, state)
+        raise HTTPException(503, detail)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     """Serve the web UI."""
@@ -197,6 +218,31 @@ def _extract_zip(content, dest_dir, taken, max_entries=2000, max_total_bytes=2 *
     return out
 
 
+def _materialize(files, in_dir):
+    """Write the uploads into in_dir (zips expanded, names deduped, natural
+    order). Returns (page_names, zip_failures)."""
+    page_names = []
+    taken = set()
+    zip_failures = []
+    for name, content in files:
+        safe = os.path.basename(name) or f"page_{len(page_names) + 1}.jpg"
+        if safe.lower().endswith(".zip"):
+            try:
+                extracted = _extract_zip(content, in_dir, taken)
+            except Exception as exc:
+                zip_failures.append((safe, f"could not unpack {safe}: {exc}"))
+                continue
+            if not extracted:
+                zip_failures.append((safe, f"{safe} contained no images"))
+            page_names.extend(extracted)
+            continue
+        final = _unique_name(safe, taken)
+        (Path(in_dir) / final).write_bytes(content)
+        page_names.append(final)
+    page_names.sort(key=_natural_key)
+    return page_names, zip_failures
+
+
 def _process(files, settings):
     """Run the full pipeline on the uploaded pages. Blocking; runs in a thread."""
     assert translator is not None  # the endpoint checks this before dispatching
@@ -207,6 +253,7 @@ def _process(files, settings):
                            model=settings["llm_model"] or None,
                            api_key=settings["api_key"])
         translator.custom_translations = settings["custom_translations"]
+        translator.pronouns = settings.get("pronouns") or {}
         translator.keep_honorifics = settings["keep_honorifics"]
         translator.font_scale = settings["font_scale"]
         if settings["font_scale"] != 1.0:
@@ -215,26 +262,7 @@ def _process(files, settings):
         in_dir = tempfile.mkdtemp(prefix="manga_in_")
         out_dir = tempfile.mkdtemp(prefix="manga_out_")
         try:
-            page_names = []
-            taken = set()
-            zip_failures = []
-            for name, content in files:
-                safe = os.path.basename(name) or f"page_{len(page_names) + 1}.jpg"
-                if safe.lower().endswith(".zip"):
-                    try:
-                        extracted = _extract_zip(content, in_dir, taken)
-                    except Exception as exc:
-                        zip_failures.append((safe, f"could not unpack {safe}: {exc}"))
-                        continue
-                    if not extracted:
-                        zip_failures.append((safe, f"{safe} contained no images"))
-                    page_names.extend(extracted)
-                    continue
-                final = _unique_name(safe, taken)
-                (Path(in_dir) / final).write_bytes(content)
-                page_names.append(final)
-
-            page_names.sort(key=_natural_key)
+            page_names, zip_failures = _materialize(files, in_dir)
             _set_progress(total=len(page_names))
 
             series_info = None
@@ -278,6 +306,82 @@ def _process(files, settings):
             shutil.rmtree(out_dir, ignore_errors=True)
 
 
+def _extract_names(files, settings):
+    """OCR the uploaded pages and draft a names/terms list via the LLM.
+    Blocking; runs in a thread (shares pipeline_lock with /translate)."""
+    assert translator is not None  # the endpoint checks this before dispatching
+    max_pages = 60  # bound the scan so a huge drop cannot run away
+    with pipeline_lock:
+        translator.set_llm(base_url=settings["llm_base_url"],
+                           model=settings["llm_model"] or None,
+                           api_key=settings["api_key"])
+        in_dir = tempfile.mkdtemp(prefix="manga_names_")
+        crops_dir = tempfile.mkdtemp(prefix="manga_crops_")
+        try:
+            page_names, _zip_failures = _materialize(files, in_dir)
+            entries = []
+            for name in page_names[:max_pages]:
+                try:
+                    _image, data = translator.detect_and_process(
+                        os.path.join(in_dir, name),
+                        output_dir=crops_dir,
+                        page_id=os.path.splitext(name)[0],
+                        conf_threshold=settings["conf_threshold"],
+                    )
+                    data = translator.run_ocr(data, apply_map=False)
+                except Exception as exc:
+                    print(f"  suggest-names: page {name} failed ({exc})")
+                    continue
+                for entry in data:
+                    text = (entry.get("original_text") or "").strip()
+                    if text:
+                        entries.append({"id": entry["id"], "jp": text})
+            items = translator.suggest_names(entries)
+            return {"items": items,
+                    "pages": min(len(page_names), max_pages),
+                    "bubbles": len(entries)}
+        finally:
+            shutil.rmtree(in_dir, ignore_errors=True)
+            shutil.rmtree(crops_dir, ignore_errors=True)
+
+
+@app.post("/suggest-names")
+async def suggest_names(
+    files: list[UploadFile] = File(...),
+    conf_threshold: float = Form(0.15),
+    llm_base_url: str = Form(""),
+    llm_model: str = Form(""),
+    api_key: str = Form(""),
+):
+    """OCR the queued pages and draft a name/term map (no translation)."""
+    if translator is None:
+        raise HTTPException(503, f"Models are not loaded. {load_error or 'Check the server logs.'}")
+
+    if not files:
+        raise HTTPException(400, "No files uploaded")
+
+    for f in files:
+        if Path(f.filename or "").suffix.lower() not in VALID_EXTENSIONS:
+            raise HTTPException(400, f"Unsupported file type: {f.filename} (use PNG/JPG/WEBP/BMP or a .zip)")
+
+    base_url = (llm_base_url or LLM_BASE_URL).rstrip("/")
+    _require_llm(base_url, api_key)
+
+    uploads = [(f.filename, await f.read()) for f in files]
+    settings = {
+        "conf_threshold": conf_threshold,
+        "llm_base_url": base_url,
+        "llm_model": llm_model.strip(),
+        "api_key": api_key.strip(),
+    }
+    try:
+        result = await run_in_threadpool(_extract_names, uploads, settings)
+    except Exception as exc:
+        raise HTTPException(500, f"Name extraction failed: {exc}")
+
+    return JSONResponse(result)
+
+
 @app.post("/translate")
 async def translate(
     files: list[UploadFile] = File(...),
@@ -285,6 +389,7 @@ async def translate(
     tags: str = Form(""),
     description: str = Form(""),
     custom_translations: str = Form(""),
+    pronouns: str = Form(""),
     keep_honorifics: bool = Form(False),
     conf_threshold: float = Form(0.15),
     batch_size: int = Form(4),
@@ -305,15 +410,7 @@ async def translate(
             raise HTTPException(400, f"Unsupported file type: {f.filename} (use PNG/JPG/WEBP/BMP or a .zip)")
 
     base_url = (llm_base_url or LLM_BASE_URL).rstrip("/")
-    state = _llm_state(base_url, api_key=api_key.strip() or None)
-    if state != "ready":
-        detail = {
-            "unreachable": f"LLM server at {base_url} is not reachable. Start it first "
-                           f"(see README: 'Local LLM server') or check the base URL.",
-            "loading": f"LLM server at {base_url} is still loading its model. Try again in a minute.",
-            "auth": f"LLM server at {base_url} rejected the API key — check the API key field.",
-        }.get(state, state)
-        raise HTTPException(503, detail)
+    _require_llm(base_url, api_key)
 
     uploads = [(f.filename, await f.read()) for f in files]
     settings = {
@@ -321,6 +418,7 @@ async def translate(
         "tags": tags.strip(),
         "description": description.strip(),
         "custom_translations": _parse_custom_translations(custom_translations),
+        "pronouns": _parse_custom_translations(pronouns),
         "keep_honorifics": keep_honorifics,
         "conf_threshold": conf_threshold,
         "batch_size": batch_size,
@@ -338,3 +436,53 @@ async def translate(
         raise HTTPException(500, f"Processing failed: {exc}")
 
     return JSONResponse({"pages": pages})
+
+
+class SeriesConfig(BaseModel):
+    """Per-series names/terms cache payload (the 'config per series')."""
+
+    title: str = ""
+    names: list = []
+    terms: list = []
+    tags: str = ""
+    description: str = ""
+
+
+def _series_slug(title):
+    """Filesystem-safe slug for a series title ('' when unusable)."""
+    return re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")[:80]
+
+
+@app.get("/series-config")
+def series_config_get(title: str = ""):
+    """Return the saved config for a series title (404 when none)."""
+    slug = _series_slug(title.strip())
+    if not slug:
+        raise HTTPException(400, "title is required")
+    path = SERIES_DIR / f"{slug}.json"
+    if not path.exists():
+        raise HTTPException(404, f"no saved config for '{title.strip()}'")
+    return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
+
+
+@app.post("/series-config")
+def series_config_save(cfg: SeriesConfig):
+    """Save (overwrite) the names/terms cache for a series title."""
+    title = cfg.title.strip()
+    slug = _series_slug(title)
+    if not slug:
+        raise HTTPException(400, "title is required")
+    names = [n for n in cfg.names if isinstance(n, dict) and str(n.get("jp") or "").strip()][:400]
+    terms = [t for t in cfg.terms if isinstance(t, dict) and str(t.get("jp") or "").strip()][:400]
+    SERIES_DIR.mkdir(exist_ok=True)
+    payload = {
+        "title": title,
+        "updated": datetime.now().isoformat(timespec="seconds"),
+        "names": names,
+        "terms": terms,
+        "tags": cfg.tags,
+        "description": cfg.description,
+    }
+    (SERIES_DIR / f"{slug}.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    return {"ok": True, "slug": slug, "names": len(names), "terms": len(terms)}

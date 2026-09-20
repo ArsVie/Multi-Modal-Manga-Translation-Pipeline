@@ -68,6 +68,10 @@ class MangaTranslator:
         # Custom translation dictionary
         self.custom_translations = custom_translations or {}
 
+        # {english_name: he|she|they|it} — pronoun memory fed into the
+        # translation prompt so each character keeps a consistent pronoun.
+        self.pronouns = {}
+
         self.keep_honorifics = keep_honorifics
         self.font_scale = float(font_scale)  # 1.0 = default; lower shrinks lettering
         self.debug = debug
@@ -601,9 +605,12 @@ class MangaTranslator:
         return [post_process(self.mocr.tokenizer.decode(o.cpu(), skip_special_tokens=True))
                 for o in out]
 
-    def run_ocr(self, manga_data, upscale_small_crops=True):
+    def run_ocr(self, manga_data, upscale_small_crops=True, apply_map=True):
         """OCR every crop of a page. All crops go through one batched model call
-        (falls back to per-crop calls if the batch fails)."""
+        (falls back to per-crop calls if the batch fails).
+
+        apply_map=False returns the raw OCR text (no custom_translations) —
+        the name/term extraction wants the Japanese exactly as OCR'd."""
         crops = []
         for entry in manga_data:
             crop = cv2.imread(entry['crop_path'])
@@ -632,7 +639,8 @@ class MangaTranslator:
                 entry['original_text'] = ""
                 continue
             # Apply custom translations to original text
-            text = self._apply_custom_translations(text)
+            if apply_map:
+                text = self._apply_custom_translations(text)
             entry['original_text'] = text.replace('\n', '')
         return manga_data
 
@@ -663,6 +671,103 @@ class MangaTranslator:
                 "maxItems": len(ids),
             },
         }
+
+    def suggest_names(self, entries, max_items=25):
+        """One LLM pass over a chapter's OCR text -> name/term draft.
+
+        entries: [{"id": ..., "jp": ...}] (one per bubble, raw OCR text).
+        Returns a validated list of {"jp", "en", "kind", "pronoun"} dicts
+        (at most `max_items`). Raises ValueError when the response cannot be
+        parsed as a JSON array.
+        """
+        if not entries:
+            return []
+        user_msg = ("OCR text, one line per speech bubble (bubble_id: text):\n"
+                    + "\n".join(f"{e['id']}: {e['jp']}" for e in entries))
+        system_msg = (
+            "You analyze raw OCR text from one Japanese manga chapter to prepare a "
+            "translator's name list. Extract the proper nouns that must be rendered "
+            "consistently in English: character names and nicknames, places, "
+            "organizations, and named techniques or forms. For each item output: the "
+            "Japanese string exactly as it appears in the text (jp), a suggested "
+            "English rendering (en; a natural English name or common romanization), "
+            "the kind, and - for characters - the pronoun the story uses for that "
+            "character: he, she, they or it. Use an empty string for pronoun when it "
+            "is not a character or cannot be inferred. Only include names that really "
+            "appear in the text. Sort by story importance, most important first; at "
+            f"most {max_items} items."
+        )
+        schema = {
+            "type": "json_object",
+            "schema": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "jp": {"type": "string"},
+                        "en": {"type": "string"},
+                        "kind": {"type": "string",
+                                 "enum": ["character", "place", "organization",
+                                          "technique", "other"]},
+                        "pronoun": {"type": "string",
+                                    "enum": ["he", "she", "they", "it", ""]},
+                    },
+                    "required": ["jp", "en", "kind", "pronoun"],
+                    "additionalProperties": False,
+                },
+                "minItems": 1,
+                "maxItems": max_items,
+            },
+        }
+        if self._no_json_schema:
+            content = self._chat(user_msg, system_message=system_msg, temperature=0.2,
+                                 max_tokens=3000)
+        else:
+            try:
+                content = self._chat(user_msg, system_message=system_msg, temperature=0.2,
+                                     response_format=schema, max_tokens=3000)
+            except _SchemaUnsupported as exc:
+                print(f"  ⚠ json_schema unsupported ({exc}); continuing without it")
+                self._no_json_schema = True
+                content = self._chat(user_msg, system_message=system_msg, temperature=0.2,
+                                     max_tokens=3000)
+
+        # Models may wrap the array in prose or code fences; slice out the array.
+        content = content.strip()
+        if "```" in content:
+            for part in content.split("```"):
+                part = part.strip()
+                if part.startswith("json"):
+                    part = part[4:].strip()
+                if part.startswith("[") and part.endswith("]"):
+                    content = part
+                    break
+        start_idx = content.find("[")
+        end_idx = content.rfind("]")
+        if start_idx == -1 or end_idx == -1:
+            raise ValueError("name extraction returned no JSON array")
+        items = json.loads(content[start_idx:end_idx + 1])
+        if not isinstance(items, list):
+            raise ValueError("name extraction response is not a list")
+
+        out = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            jp = str(item.get("jp") or "").strip()
+            en = str(item.get("en") or "").strip()
+            if not jp or not en:
+                continue
+            kind = str(item.get("kind") or "other").strip().lower()
+            if kind not in ("character", "place", "organization", "technique", "other"):
+                kind = "other"
+            pronoun = str(item.get("pronoun") or "").strip().lower()
+            if pronoun not in ("he", "she", "they", "it"):
+                pronoun = ""
+            out.append({"jp": jp, "en": en, "kind": kind, "pronoun": pronoun})
+            if len(out) >= max_items:
+                break
+        return out
 
     def _translate_chunk(self, entries, context_str, system_prompt, depth=0):
         """One batch LLM call for a group of bubbles -> {bubble_id: translation}.
@@ -745,6 +850,16 @@ Title: {series_info.get('title', 'Unknown')}
 Tags/Genre: {series_info.get('tags', 'Unknown')}
 Description: {series_info.get('description', 'None')}
 """
+
+        if self.pronouns:
+            pairs = "; ".join(
+                f"{en} = {p}" for en, p in self.pronouns.items() if en and p
+            )
+            if pairs:
+                context_str += (
+                    "\nCHARACTER PRONOUNS (keep these when referring to each "
+                    f"character): {pairs}\n"
+                )
 
         system_prompt = (
             "You are a professional manga translator."
