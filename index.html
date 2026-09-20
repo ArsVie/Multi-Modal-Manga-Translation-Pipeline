@@ -216,6 +216,7 @@
           <div class="picklist" id="series-picklist"></div>
         </span>
         <button type="button" id="series-new-btn" title="New series (clears the title)">+</button>
+        <button type="button" id="series-save-btn" title="Save this series now">Save</button>
         <span class="note" id="series-status"></span>
       </div>
       <div class="seriesrow">
@@ -667,6 +668,7 @@
   function tableDirty() {
     clearTimeout(tblSaveTimer);
     tblSaveTimer = setTimeout(saveSettings, 300);
+    markUnsaved();
   }
 
   function mkCellInput(value, placeholder, cls) {
@@ -880,6 +882,11 @@
     seriesStatus.textContent = text || "";
     seriesStatus.style.color = color || "#8abeb7";
   }
+  var seriesSuppressDirty = false;
+  function markUnsaved() {
+    if (seriesSuppressDirty || !currentTitle()) return;
+    setSeriesStatus("unsaved changes", "#c2a25a");
+  }
   function seriesSaveToCache() {
     var title = currentTitle();
     if (!title) return;
@@ -909,11 +916,13 @@
   function seriesLoadFromCache(announce) {
     var title = currentTitle();
     if (!title) { setSeriesStatus(""); return; }
+    seriesSuppressDirty = true;
     fetch("/series-config?title=" + encodeURIComponent(title))
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (cfg) {
         if (!cfg) {
-          if (announce) setSeriesStatus("new series — saves on translate / auto-map", "#8abeb7");
+          seriesSuppressDirty = false;
+          if (announce) setSeriesStatus("new series — not saved yet", "#8abeb7");
           return;
         }
         namesRows = (cfg.names || []).map(function (row) {
@@ -927,13 +936,14 @@
         renderNames();
         renderTerms();
         tableDirty();
+        seriesSuppressDirty = false;
         if (announce) {
           var stamp = shortStamp(cfg.updated);
           setSeriesStatus("loaded — " + namesRows.length + " names · " + termsRows.length + " terms" +
             (stamp ? " · " + stamp : ""), "#b5bd68");
         }
       })
-      .catch(function () { /* no cached config — keep what we have */ });
+      .catch(function () { seriesSuppressDirty = false; /* no cached config — keep what we have */ });
   }
   function closePickList() { pickList.classList.remove("open"); }
   $("series-pick-btn").addEventListener("click", function (e) {
@@ -982,8 +992,20 @@
     if (currentTitle()) seriesSaveToCache();
     seriesTitleEl.value = "";
     seriesTitleEl.focus();
-    setSeriesStatus("new series — saves on translate / auto-map", "#8abeb7");
+    setSeriesStatus("new series — not saved yet", "#8abeb7");
     saveSettings();
+  });
+
+  $("series-save-btn").addEventListener("click", function () {
+    if (!currentTitle()) {
+      setSeriesStatus("no title to save", "#cc6666");
+      seriesTitleEl.focus();
+      return;
+    }
+    seriesSaveToCache();
+  });
+  ["series-tags", "series-desc"].forEach(function (id) {
+    $(id).addEventListener("input", markUnsaved);
   });
   seriesTitleEl.addEventListener("change", function () { seriesLoadFromCache(true); });
 
