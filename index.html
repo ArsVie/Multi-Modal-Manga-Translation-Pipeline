@@ -934,8 +934,12 @@
         termsRows = (cfg.terms || []).map(function (row) {
           return { jp: row.jp || "", en: row.en || "" };
         });
-        if (!$("series-tags").value.trim() && cfg.tags) $("series-tags").value = cfg.tags;
-        if (!$("series-desc").value.trim() && cfg.description) $("series-desc").value = cfg.description;
+        // Picking (or loading by title) REPLACES the context fields with this
+        // series' saved values — edits to the previous series were saved first
+        // on switch (see the picker handler). Configs without a value clear
+        // the field: what you see is exactly what will be saved next.
+        $("series-tags").value = cfg.tags || "";
+        $("series-desc").value = cfg.description || "";
         renderNames();
         renderTerms();
         tableDirty();
