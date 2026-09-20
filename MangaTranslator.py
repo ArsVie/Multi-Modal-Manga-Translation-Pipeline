@@ -394,13 +394,17 @@ class MangaTranslator:
         else:
             target_width_ratio = 0.82
 
-        # Extreme tall-and-narrow regions (h >= 2.5w) are usually vertical
-        # Japanese columns: laying English out horizontally there collapses
-        # into a tiny hyphenated word-stack. Instead lay the block out in the
+        # Extreme tall-and-narrow regions are usually vertical Japanese
+        # columns: laying English out horizontally there collapses into a
+        # tiny hyphenated word-stack. Instead lay the block out in the
         # swapped dimensions and rotate it 90 degrees clockwise (reads
-        # top-to-bottom) — much larger, legible type. Only used when it
-        # actually beats the horizontal layout, never for regular bubbles.
-        ROTATE_MIN_ASPECT = 2.5
+        # top-to-bottom) — much larger, legible type.
+        # Gated hard on purpose: the box must be REALLY skinny (h >= 3w) AND
+        # the rotated layout must win by a wide margin. Boxes near the old
+        # 2.5 gate (tall narration strips jitter around ~2.5 aspect from run
+        # to run) must never flip normal text sideways.
+        ROTATE_MIN_ASPECT = 3.0
+        ROTATE_MIN_GAIN = 1.25  # rotated size must beat horizontal by 25%+
         rotated_layout = None
         if box_height >= ROTATE_MIN_ASPECT * box_width:
             rot_wrap_width = int(box_height * 0.85)
@@ -457,12 +461,12 @@ class MangaTranslator:
             for size in range(max_size, min_size - 1, -1):
                 wrapped = try_wrap(size, allow_hard_break, allow_hyphen)
                 if wrapped is not None:
-                    if rotated_layout and rotated_layout[0] > size:
+                    if rotated_layout and rotated_layout[0] >= size * ROTATE_MIN_GAIN:
                         return rotated_layout[0], rotated_layout[1], True
                     return size, wrapped, False
 
         # Fallback: minimum size
-        if rotated_layout and rotated_layout[0] > min_size:
+        if rotated_layout and rotated_layout[0] >= min_size * ROTATE_MIN_GAIN:
             return rotated_layout[0], rotated_layout[1], True
         font = self._get_font(min_size)
         wrapped = self._wrap_text_dynamic(
