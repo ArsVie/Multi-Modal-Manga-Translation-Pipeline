@@ -127,7 +127,7 @@ uvicorn server:app --host 0.0.0.0 --port 8000
 # open http://localhost:8000   (any free port works — 8000 is taken on some setups)
 ```
 
-Drop pages, folders or a `.zip` in (or paste with Ctrl+V), hit Translate, download results. After a translation the layout becomes a comparison workspace: **originals on the left** as full-width pages you scroll through, and a **single-page translated viewer on the right** (sticky, fitted to the screen) with ◀ ▶ buttons or ← → arrow keys to flip pages. Queues show the page count and an estimated time (a per-page average learned from your own runs; .zip page counts are read from the zip directory). The UI wears 4chan's "Tomorrow" theme. **Translation can run against any OpenAI-compatible endpoint** — the local llama.cpp server by default, or e.g. OpenAI / OpenRouter via the LLM preset, with the API key and model name set in the settings (detection, OCR and lettering always stay local). Advanced settings (persisted in the browser) cover:
+Drop pages, folders or a `.zip` in (or paste with Ctrl+V), hit Translate, download results (pages appear as they finish; **Stop** cancels a run and keeps whatever finished). After a translation the layout becomes a comparison workspace: **originals on the left** as full-width pages you scroll through, and a **single-page translated viewer on the right** (sticky, fitted to the screen) with ◀ ▶ buttons or ← → arrow keys to flip pages. Queues show the page count and an estimated time (a per-page average learned from your own runs; .zip page counts are read from the zip directory). The UI wears 4chan's "Tomorrow" theme. **Translation can run against any OpenAI-compatible endpoint** — the local llama.cpp server by default, or e.g. OpenAI / OpenRouter via the LLM preset, with the API key and model name set in the settings (detection, OCR and lettering always stay local). Advanced settings (persisted in the browser) cover:
 
 - **Custom names map** — one `jp=English` per line (or comma-separated), applied to OCR output before translation
 - **Series context** — title / tags / description for tone and consistency
@@ -135,7 +135,7 @@ Drop pages, folders or a `.zip` in (or paste with Ctrl+V), hit Translate, downlo
 - **Lettering size** — 1.0 = default, lower shrinks the English lettering
 - **Batch size, detection confidence, keep-honorifics, comparison sheets**
 
-`POST /translate` (multipart: `files`, plus the same fields) returns base64 pages for scripting.
+`POST /translate` (multipart: `files`, plus the same fields) streams NDJSON for scripting: one `{"type": "page", "filename", "translated_b64", "comparison_b64"}` line per finished page, then `{"type": "done", "cancelled"}` (or `{"type": "error", "message"}`). `POST /cancel` stops the running job at its next page boundary.
 
 ## Stage comparison
 
