@@ -6,6 +6,7 @@ Endpoints:
     POST /translate -> upload manga pages, get translated images back (base64)
     POST /suggest-names -> OCR the pages and draft a names/terms list (LLM)
     GET/POST /series-config -> per-series names/terms cache (keyed by title)
+    GET  /series-configs -> list saved series configs (for the UI picker)
 
 Run:
     uvicorn server:app --host 0.0.0.0 --port 8000
@@ -450,7 +451,7 @@ class SeriesConfig(BaseModel):
 
 def _series_slug(title):
     """Filesystem-safe slug for a series title ('' when unusable)."""
-    return re.sub(r"[^a-z0-9]+", "-", (title or "").lower()).strip("-")[:80]
+    return re.sub(r"[^\w]+", "-", (title or "").lower()).strip("-")[:80]
 
 
 @app.get("/series-config")
@@ -486,3 +487,26 @@ def series_config_save(cfg: SeriesConfig):
     (SERIES_DIR / f"{slug}.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     return {"ok": True, "slug": slug, "names": len(names), "terms": len(terms)}
+
+
+@app.get("/series-configs")
+def series_configs_list():
+    """List saved series configs, most recently updated first."""
+    series = []
+    if SERIES_DIR.exists():
+        for path in sorted(SERIES_DIR.glob("*.json")):
+            try:
+                cfg = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(cfg, dict):
+                continue
+            series.append({
+                "slug": path.stem,
+                "title": cfg.get("title") or path.stem,
+                "updated": cfg.get("updated") or "",
+                "names": len(cfg.get("names") or []),
+                "terms": len(cfg.get("terms") or []),
+            })
+    series.sort(key=lambda s: s["updated"], reverse=True)
+    return JSONResponse({"series": series[:200]})

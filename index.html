@@ -51,6 +51,27 @@
   details.adv[open] > summary { margin-bottom: 6px; }
   details.adv > summary::marker { color: #b294bb; }
 
+  /* -------- series bar (per-series config picker) -------- */
+  .seriesbar { background: #282a2e; border: 1px solid #282a2e; padding: 8px 10px; margin: 0 0 8px;
+               display: flex; flex-direction: column; gap: 7px; }
+  .seriesrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .seriesrow > label { font-size: 9.5pt; color: #b294bb; font-weight: bold; min-width: 52px; }
+  .seriesrow input[type=text] { flex: 1 1 240px; min-width: 160px; }
+  .seriesrow #series-tags { flex: 1 1 160px; }
+  .seriesrow button { padding: 3px 10px; }
+  .pickwrap { position: relative; }
+  .picklist { position: absolute; left: 0; top: calc(100% + 4px); z-index: 40; background: #1d1f21;
+              border: 1px solid #3a3d42; min-width: 390px; max-width: 460px; max-height: 300px;
+              overflow: auto; padding: 4px; display: none; box-shadow: 0 6px 18px rgba(0,0,0,.5); }
+  .picklist.open { display: block; }
+  .pickitem { display: flex; justify-content: space-between; align-items: baseline; gap: 14px;
+              padding: 5px 8px; cursor: pointer; }
+  .pickitem:hover { background: #282a2e; }
+  .pickitem .ptitle { color: #c5c8c6; }
+  .pickitem .pmeta { color: #969896; font-size: 8.5pt; white-space: nowrap; }
+  .pickempty { color: #969896; font-size: 9pt; padding: 6px 8px; }
+  .seriesdesc { display: flex; flex-direction: column; gap: 3px; font-size: 9.5pt; color: #c5c8c6; }
+
   /* -------- experimental: names & terms tables -------- */
   .expwrap { display: flex; flex-direction: column; gap: 10px; }
   .exprow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -66,7 +87,7 @@
   .tbl button { padding: 2px 0; font-size: 9.5pt; }
   button.mini { padding: 1px 9px; font-size: 11pt; line-height: 1.25; }
 
-  input[type=text], input[type=number], textarea, select {
+  input[type=text], input[type=number], input[type=password], textarea, select {
     background: #1d1f21; color: #c5c8c6; border: 1px solid #3a3d42;
     padding: 3px 4px; font-family: inherit; font-size: 10pt;
   }
@@ -110,7 +131,8 @@
   .advgrid label.check { cursor: pointer; }
   .advgrid small.note { font-size: 8.5pt; color: #969896; }
 
-  .advgrid { display: grid; grid-template-columns: 1fr; gap: 11px 18px; margin-top: 8px; }
+  .advgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 11px 18px; margin-top: 8px; }
+  .wide .advgrid { grid-template-columns: 1fr; }
   .advgrid label { display: flex; flex-direction: column; gap: 3px; font-size: 9.5pt; }
   .advgrid label.check { flex-direction: row; align-items: center; gap: 6px; }
   .advgrid .full { grid-column: 1 / -1; }
@@ -169,6 +191,26 @@
   <fieldset class="postform">
     <legend>Start a translation</legend>
 
+    <div class="seriesbar">
+      <div class="seriesrow">
+        <label for="series-title">Series</label>
+        <input type="text" id="series-title" placeholder="Type or pick a saved series (e.g. 転生したらスライムだった件)">
+        <span class="pickwrap">
+          <button type="button" id="series-pick-btn" title="Pick a saved series">Saved ▾</button>
+          <div class="picklist" id="series-picklist"></div>
+        </span>
+        <button type="button" id="series-new-btn" title="New series (clears the title)">+</button>
+        <span class="note" id="series-status"></span>
+      </div>
+      <div class="seriesrow">
+        <label for="series-tags">Tags</label>
+        <input type="text" id="series-tags" placeholder="Action, Fantasy, Comedy…">
+      </div>
+      <label class="seriesdesc">Description
+        <textarea id="series-desc" rows="3" placeholder="One-paragraph plot summary — helps tone and character voices"></textarea>
+      </label>
+    </div>
+
     <div class="dropzone" id="dropzone">Drop pages, folders or a .zip — or click to browse, or paste with <kbd>Ctrl</kbd>+<kbd>V</kbd>
       <div class="dz-links">PNG / JPG / WEBP / ZIP · <a id="pick-folder">browse a folder…</a></div>
     </div>
@@ -193,11 +235,6 @@
         <label>LLM base URL <input type="text" id="llm-url" value="http://localhost:8110"></label>
         <label>API key <input type="password" id="llm-key" placeholder="blank = none (local servers)"></label>
         <label>Model name <input type="text" id="llm-model" placeholder="blank = server default (e.g. gpt-4o-mini)"></label>
-        <label>Series title <input type="text" id="series-title" placeholder="e.g. Sekai Saikou no Ansatsusha"></label>
-        <label>Tags <input type="text" id="series-tags" placeholder="Action, Fantasy, Comedy…"></label>
-        <label class="full">Description
-          <textarea id="series-desc" rows="3" placeholder="One-paragraph plot summary — helps tone and character voices"></textarea>
-        </label>
         <label>Batch size (pages translated together)
           <input type="number" id="batch-size" value="4" min="1" max="16">
         </label>
@@ -207,7 +244,7 @@
         <label>Lettering size (1.0 = default, lower = smaller)
           <input type="number" id="font-scale" value="1.0" min="0.5" max="1.0" step="0.05">
         </label>
-        <label class="check"><input type="checkbox" id="save-comparisons" checked> Show comparison sheet (Original / Translated / Translated + LaMa)</label>
+        <label class="check full"><input type="checkbox" id="save-comparisons" checked> Show comparison sheet (Original / Translated / Translated + LaMa)</label>
       </div>
     </details>
 
@@ -811,14 +848,28 @@
       });
   });
 
-  // ---------- experimental: per-series config cache ----------
+  // ---------- per-series config cache (with saved-series picker) ----------
   var seriesTitleEl = $("series-title");
+  var seriesStatus = $("series-status");
+  var pickList = $("series-picklist");
   function currentTitle() {
     return seriesTitleEl.value.trim();
+  }
+  function shortStamp(iso) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso || "");
+    return m ? m[2] + "/" + m[3] + " " + m[4] + ":" + m[5] : "";
+  }
+  function setSeriesStatus(text, color) {
+    seriesStatus.textContent = text || "";
+    seriesStatus.style.color = color || "#8abeb7";
   }
   function seriesSaveToCache() {
     var title = currentTitle();
     if (!title) return;
+    var counts = {
+      names: namesRows.filter(function (row) { return (row.jp || "").trim(); }).length,
+      terms: termsRows.filter(function (row) { return (row.jp || "").trim(); }).length
+    };
     var body = {
       title: title,
       names: namesRows.filter(function (row) { return (row.jp || "").trim(); }),
@@ -830,15 +881,24 @@
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
+    }).then(function (r) {
+      if (r.ok) {
+        setSeriesStatus("saved — " + counts.names + " names · " + counts.terms + " terms", "#b5bd68");
+      } else {
+        setSeriesStatus("save failed (HTTP " + r.status + ")", "#cc6666");
+      }
     }).catch(function () { /* the cache is best-effort */ });
   }
-  function seriesLoadFromCache() {
+  function seriesLoadFromCache(announce) {
     var title = currentTitle();
-    if (!title) return;
+    if (!title) { setSeriesStatus(""); return; }
     fetch("/series-config?title=" + encodeURIComponent(title))
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (cfg) {
-        if (!cfg) return;
+        if (!cfg) {
+          if (announce) setSeriesStatus("new series — saves on translate / auto-map", "#8abeb7");
+          return;
+        }
         namesRows = (cfg.names || []).map(function (row) {
           return { jp: row.jp || "", en: row.en || "", pr: row.pr || "" };
         });
@@ -850,10 +910,65 @@
         renderNames();
         renderTerms();
         tableDirty();
+        if (announce) {
+          var stamp = shortStamp(cfg.updated);
+          setSeriesStatus("loaded — " + namesRows.length + " names · " + termsRows.length + " terms" +
+            (stamp ? " · " + stamp : ""), "#b5bd68");
+        }
       })
       .catch(function () { /* no cached config — keep what we have */ });
   }
-  seriesTitleEl.addEventListener("change", function () { seriesLoadFromCache(); });
+  function closePickList() { pickList.classList.remove("open"); }
+  $("series-pick-btn").addEventListener("click", function (e) {
+    e.stopPropagation();
+    if (pickList.classList.contains("open")) { closePickList(); return; }
+    pickList.innerHTML = '<div class="pickempty">loading…</div>';
+    pickList.classList.add("open");
+    fetch("/series-configs").then(function (r) { return r.json(); }).then(function (body) {
+      var list = (body && body.series) || [];
+      pickList.innerHTML = "";
+      if (!list.length) {
+        pickList.innerHTML = '<div class="pickempty">No saved series yet — translate once and it saves automatically.</div>';
+        return;
+      }
+      list.forEach(function (s) {
+        var item = document.createElement("div");
+        item.className = "pickitem";
+        var t = document.createElement("span");
+        t.className = "ptitle";
+        t.textContent = s.title;
+        var m = document.createElement("span");
+        m.className = "pmeta";
+        var stamp = shortStamp(s.updated);
+        m.textContent = s.names + " names · " + s.terms + " terms" + (stamp ? " · " + stamp : "");
+        item.appendChild(t);
+        item.appendChild(m);
+        item.addEventListener("click", function () {
+          closePickList();
+          var cur = currentTitle();
+          if (cur && cur !== s.title) seriesSaveToCache();  // keep this series' edits first
+          seriesTitleEl.value = s.title;
+          seriesLoadFromCache(true);
+          saveSettings();
+        });
+        pickList.appendChild(item);
+      });
+    }).catch(function () {
+      pickList.innerHTML = '<div class="pickempty">could not load the series list</div>';
+    });
+  });
+  document.addEventListener("click", function (e) {
+    if (pickList.classList.contains("open") && !pickList.contains(e.target)) closePickList();
+  });
+  $("series-new-btn").addEventListener("click", function () {
+    closePickList();
+    if (currentTitle()) seriesSaveToCache();
+    seriesTitleEl.value = "";
+    seriesTitleEl.focus();
+    setSeriesStatus("new series — saves on translate / auto-map", "#8abeb7");
+    saveSettings();
+  });
+  seriesTitleEl.addEventListener("change", function () { seriesLoadFromCache(true); });
 
   // ---------- collapsible sections remember their open/closed state ----------
   var SECTION_IDS = ["adv-box", "exp-box"];
@@ -865,7 +980,7 @@
   (function restoreSections() {
     var state = null;
     try { state = JSON.parse(localStorage.getItem("manga-sections") || "null"); } catch (e) { state = null; }
-    $("adv-box").open = state ? !!state["adv-box"] : true;   // first run: keep Advanced visible
+    $("adv-box").open = state ? !!state["adv-box"] : false;  // first run: keep the form compact
     $("exp-box").open = state ? !!state["exp-box"] : false;
     SECTION_IDS.forEach(function (id) {
       $(id).addEventListener("toggle", saveSections);
@@ -921,7 +1036,7 @@
   loadSettings();
   renderNames();
   renderTerms();
-  if (!namesRows.length && !termsRows.length) seriesLoadFromCache();
+  if (!namesRows.length && !termsRows.length) seriesLoadFromCache(true);
   updateAutomapBtn();
   fields.forEach(function (id) { $(id).addEventListener("change", saveSettings); });
 
