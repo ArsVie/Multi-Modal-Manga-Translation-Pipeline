@@ -147,14 +147,6 @@
   button:hover:enabled { background: #81a2be; color: #1d1f21; }
   button:disabled { opacity: .5; cursor: default; }
 
-  /* primary action — the translate button is the CTA of the pre-translation view */
-  .actions { margin-top: 10px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  #translate-btn { padding: 8px 30px; font-size: 11pt; font-weight: bold;
-                   background: #81a2be; color: #1d1f21; border-color: #5F89AC; }
-  #translate-btn:hover:enabled { background: #5F89AC; color: #1d1f21; }
-  /* keep the queue bounded so drop + queue + translate fit one screenful */
-  .container:not(.wide) .thumbs { max-height: 40vh; overflow-y: auto; padding-right: 2px; }
-
   .st { font-weight: bold; font-size: 8pt; }
   .st.queued { color: #585858; }
   .st.processing { color: #f0c674; }
@@ -210,7 +202,7 @@
     <div class="note" id="queue-note"></div>
     <div class="thumbs" id="thumbs"></div>
 
-    <div class="actions">
+    <div style="margin-top: 6px;">
       <button id="translate-btn" disabled>Translate</button>
       <span id="global-status" class="note"></span>
     </div>
