@@ -1,39 +1,20 @@
 # Multi-Modal Manga Translation Pipeline
 
-End-to-end ML pipeline that detects, extracts, translates, and typesets Japanese manga — fully local, no paid APIs.
+Detect, translate and letter Japanese manga pages — **fully local, no paid APIs**. Drop a chapter into the web UI and translated pages come back as they finish.
 
-Page image → YOLOv8 bubble detection → MangaOCR → local LLM translation → LaMa/OpenCV cleanup → typesetting.
+![Results workspace — originals on the left, the translated page in the viewer](docs/ui-04-results.png)
 
-![Not translated | Translated | Translated + LaMa inpainting](013_comparison.png)
+Under the hood: page image → YOLOv8 bubble detection → manga-OCR → local LLM translation → OpenCV/LaMa cleanup → PIL lettering.
 
-*Left: the original page. Middle: translated with the simple blur cleanup. Right: translated with the OpenCV + LaMa hybrid cleanup — the current default output.*
+## Features
 
-## How it works
-
-```
-┌────────┐   ┌───────────────────┐   ┌──────────┐   ┌──────────────────────┐   ┌────────────────┐   ┌───────────┐
-│  Page  │──▶│ YOLOv8 detector   │──▶│ MangaOCR │──▶│ Local LLM            │──▶│ Cleanup:       │──▶│ Typeset   │
-│  image │   │ text_bubble +     │   │  (JP     │   │ (llama.cpp server,   │   │ OpenCV bubbles │   │ (PIL,     │
-│        │   │ text_free regions │   │  text)   │   │  e.g. Gemma 26B-A4B) │   │ + LaMa free    │   │ auto-size)│
-└────────┘   └───────────────────┘   └──────────┘   └──────────────────────┘   │ text           │   └───────────┘
-                                                                               └────────────────┘
-```
-
-- **Detection** — YOLOv8 (`ogkalu/comic-speech-bubble-detector-yolov8m`) labels each region `text_bubble` or `text_free`, sorted in manga reading order (top-to-bottom rows, right-to-left).
-- **OCR** — MangaOCR extracts the Japanese text of each crop.
-- **Translation** — pages are translated in batches (shared context for consistency). The LLM gets series context (title/tags/description), a custom names map, and returns strict JSON with one translation per bubble. Fully local via any OpenAI-compatible server (llama.cpp).
-- **Cleanup** — hybrid: OpenCV inpainting inside speech bubbles (preserves tails and borders), LaMa inpainting over free text (redraws the background).
-- **Typesetting** — dynamic font sizing per bubble, hyphenated wrapping, white outline for readability.
-
-## Stack
-
-| Stage | Tool | Notes |
-|---|---|---|
-| Detection | ultralytics YOLOv8m — `ogkalu/comic-speech-bubble-detector-yolov8m` | ~52 MB, runs on CPU or GPU |
-| OCR | `manga-ocr` (kha-white) | ~410 MB weights, CUDA/CPU |
-| Translation | local llama.cpp server (OpenAI-compatible API) | Gemma 4 26B-A4B by default; Qwen3.6 35B-A3B also verified |
-| Inpainting | `simple-lama-inpainting` (big-lama) + OpenCV | ~196 MB weights, CUDA/CPU |
-| Typesetting | PIL + a comic lettering font (Anime Ace 2.0 recommended) | |
+- **Pages stream in as they finish** — every page appears in the viewer the moment it is lettered, not at the end of the batch. A **Stop** button cancels a run at the next page boundary and keeps whatever already finished.
+- **Comparison workspace** — originals on the left as a scrollable rail, single translated page in a sticky viewer on the right, ◀ ▶ buttons or ← → arrow keys to flip.
+- **Per-series config, saved and reusable** — series title / tags / description plus **names & terms tables** (JP | EN | pronoun) are stored per series: auto-loaded by title, auto-saved on translate, and updatable any time with an explicit **Save**. **Automatically Map Terms and Names** drafts the tables from the chapter in one click.
+- **Fully local end to end** — detection, OCR, cleanup and lettering run on your machine; translation runs against a local llama.cpp server by default. Any OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, hosted APIs) can be used instead from the settings.
+- **Lettering that fits** — whole-word wrapping that shrinks instead of hyphenating, dynamic per-bubble sizing, white outline for readability. Extremely tall vertical columns render rotated, reading top-to-bottom.
+- **Cleanup comparison sheets** — optional three-panel PNG per page (original | translated | with inpainting) for quick visual checks.
+- **Queue niceties** — pages, folders and `.zip` inputs, paste with Ctrl+V, drag/arrow reordering, per-page time estimates learned from your own runs.
 
 ## Quickstart
 
@@ -76,24 +57,23 @@ python scripts/smoke.py
 
 First run auto-downloads MangaOCR (~410 MB) and big-lama (~196 MB). Total pipeline footprint ≈ 5 GB + your LLM weights. A CUDA GPU is recommended; CPU-only works — the device auto-detects.
 
-## Local LLM server
+## Web UI
 
-Translation targets **any OpenAI-compatible endpoint** — llama.cpp, Ollama, LM Studio, vLLM, or a hosted API (paste its base URL + API key + model name in the web UI). The reference configuration this repo is tuned on: Gemma 4 26B-A4B served by llama.cpp (`llama-server`), reasoning off —
+![Queue populated, series config saved](docs/ui-01-main.png)
 
-```bash
-llama-server \
-  -m /path/to/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf \
-  --mtp-head /path/to/gemma-4-26B-A4B-it-assistant.Q4_K_M.gguf \
-  --spec-type mtp --draft-block-size 3 --draft-max 8 --draft-min 0 \
-  --cpu-moe -ngl 99 -ngld 99 -fa on -ctk q8_0 -ctv q8_0 -c 32000 --no-mmap \
-  --reasoning off --jinja --host 127.0.0.1 --port 8110
-```
+Drop pages, folders or a `.zip` in (or paste with Ctrl+V), hit **Translate** — pages appear in the viewer as they finish, and **Stop** cancels a run and keeps whatever already finished:
 
-Qwen3.6-35B-A3B runs the same way (any port; pass it via `llm_base_url`). Check readiness with `curl http://localhost:8110/health` — `200` means the model is loaded, `503` means it is still loading.
+![Translating — Stop is live while pages stream in](docs/ui-03-translating.png)
 
-Measured on an RTX PRO 1000 8 GB + DDR5 (Gemma 26B-A4B Q4_K_M + MTP): ~17–29 tokens/s generation; a typical page (~250 output tokens) translates in ~10–20 s.
+After a translation the layout becomes a comparison workspace: **originals on the left** as full-width pages you scroll through, and a **single-page translated viewer on the right** (sticky, fitted to the screen) with ◀ ▶ buttons or ← → arrow keys to flip pages. Queues show the page count and an estimated time (a per-page average learned from your own runs; `.zip` page counts are read from the zip directory).
 
-## Usage
+Series context and the names/terms tables are saved per series — load one from the **Saved ▾** picker, or fill it in and hit **Save**:
+
+![Names and terms — per-series config with pronouns](docs/ui-02-names-terms.png)
+
+Advanced settings (persisted in the browser) cover the LLM server URL / key / model, lettering size, batch size, detection confidence, keep-honorifics and comparison sheets; the custom names map lives in the Experimental section.
+
+For scripting, `POST /translate` (multipart: `files`, plus the same fields) streams NDJSON: one `{"type": "page", "filename", "translated_b64", "comparison_b64"}` line per finished page, then `{"type": "done", "cancelled"}` (or `{"type": "error", "message"}`). `POST /cancel` stops the running job at its next page boundary.
 
 ### Python
 
@@ -120,32 +100,30 @@ t.process_chapter(
 )
 ```
 
-### Web UI
+## Local LLM server
+
+Translation targets **any OpenAI-compatible endpoint** — llama.cpp, Ollama, LM Studio, vLLM, or a hosted API (paste its base URL + API key + model name in the web UI). The reference configuration this repo is tuned on: Gemma 4 26B-A4B served by llama.cpp (`llama-server`), reasoning off —
 
 ```bash
-uvicorn server:app --host 0.0.0.0 --port 8000
-# open http://localhost:8000   (any free port works — 8000 is taken on some setups)
+llama-server \
+  -m /path/to/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf \
+  --mtp-head /path/to/gemma-4-26B-A4B-it-assistant.Q4_K_M.gguf \
+  --spec-type mtp --draft-block-size 3 --draft-max 8 --draft-min 0 \
+  --cpu-moe -ngl 99 -ngld 99 -fa on -ctk q8_0 -ctv q8_0 -c 32000 --no-mmap \
+  --reasoning off --jinja --host 127.0.0.1 --port 8110
 ```
 
-Drop pages, folders or a `.zip` in (or paste with Ctrl+V), hit Translate, download results (pages appear as they finish; **Stop** cancels a run and keeps whatever finished). After a translation the layout becomes a comparison workspace: **originals on the left** as full-width pages you scroll through, and a **single-page translated viewer on the right** (sticky, fitted to the screen) with ◀ ▶ buttons or ← → arrow keys to flip pages. Queues show the page count and an estimated time (a per-page average learned from your own runs; .zip page counts are read from the zip directory). The UI wears 4chan's "Tomorrow" theme. **Translation can run against any OpenAI-compatible endpoint** — the local llama.cpp server by default, or e.g. OpenAI / OpenRouter via the LLM preset, with the API key and model name set in the settings (detection, OCR and lettering always stay local). Advanced settings (persisted in the browser) cover:
+Qwen3.6-35B-A3B runs the same way (any port; pass it via `llm_base_url`). Check readiness with `curl http://localhost:8110/health` — `200` means the model is loaded, `503` means it is still loading.
 
-- **Custom names map** — one `jp=English` per line (or comma-separated), applied to OCR output before translation
-- **Series context** — title / tags / description for tone and consistency
-- **LLM server** — pick the Gemma or Qwen endpoint, or enter a custom URL
-- **Lettering size** — 1.0 = default, lower shrinks the English lettering
-- **Batch size, detection confidence, keep-honorifics, comparison sheets**
+Measured on an RTX PRO 1000 8 GB + DDR5 (Gemma 26B-A4B Q4_K_M + MTP): ~17–29 tokens/s generation; a 3-page chapter translates in about a minute.
 
-`POST /translate` (multipart: `files`, plus the same fields) streams NDJSON for scripting: one `{"type": "page", "filename", "translated_b64", "comparison_b64"}` line per finished page, then `{"type": "done", "cancelled"}` (or `{"type": "error", "message"}`). `POST /cancel` stops the running job at its next page boundary.
+## Cleanup quality
 
-## Stage comparison
+`save_comparisons=True` (or the web toggle) writes `<page>_comparison.png` — a three-panel sheet for visual regression checks:
 
-`save_comparisons=True` (or the web toggle) writes `<page>_comparison.png`:
+![Not translated | Translated | Translated + LaMa inpainting](013_comparison.png)
 
-1. **Not translated** — the original page
-2. **Translated** — legacy cleanup (Gaussian blur per bubble) + typeset
-3. **Translated + LaMa inpainting** — OpenCV + LaMa hybrid cleanup + typeset (the default output)
-
-It is a quick visual regression check for cleanup quality — see the sheet at the top of this README.
+*Left: the original. Middle: legacy cleanup (Gaussian blur per bubble). Right: the current default — OpenCV inpainting inside bubbles, LaMa over free text.*
 
 ## Configuration
 
@@ -166,7 +144,7 @@ It is a quick visual regression check for cleanup quality — see the sheet at t
 - **"LLM server ... is not reachable"** — start llama-server first; `curl http://localhost:8110/health` (503 = still loading, 200 = ready).
 - **No bubbles detected** — lower `conf_threshold` (e.g. `0.10`).
 - **CUDA out of memory** — pass `device="cpu"`, or free VRAM (the LLM server holds ~2.5 GB).
-- **Awkward line breaks** — words are kept whole and the font shrinks instead of hyphenating; syllable hyphenation and hard cuts are only last resorts, and names from the custom map are never split. Adjust the size range in `_calculate_optimal_font_size` / `_wrap_text_dynamic`.
+- **Awkward line breaks** — words are kept whole and the font shrinks instead of hyphenating; syllable hyphenation and hard cuts are only last resorts, and names from the custom map are never split.
 - **Some sound effects stay Japanese** — the detector only finds bubbles and free text it was trained on; SFX are frequently missed. Expected.
 
 ## Known limitations
