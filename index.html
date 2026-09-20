@@ -172,6 +172,11 @@
   .viewerNav { display: none; align-items: center; gap: 10px; margin: 2px 0 8px; }
   .viewerNav button { padding: 3px 14px; font-size: 11pt; line-height: 1.2; }
   .viewerNav .counter { color: #969896; font-size: 10pt; }
+  .viewerNav .navspacer { flex: 1 1 auto; }
+  /* double-page spread: the pair sits side by side; RTL puts page N on the RIGHT */
+  #results.spread { flex-direction: row; justify-content: center; align-items: flex-start; gap: 12px; }
+  #results.spread.rtl { flex-direction: row-reverse; }
+  #results.spread .reply { flex: 1 1 0; min-width: 0; }
   .dl { margin-top: 6px; font-size: 9pt; }
   .dl a { margin-right: 12px; text-decoration: underline; }
 </style>
@@ -287,9 +292,13 @@
   <div class="gallery">
     <div class="galleryHead">Pages</div>
     <div class="viewerNav" id="viewer-nav">
-      <button type="button" id="page-prev" title="Previous page (&#8592; key)">&#9664;</button>
+      <button type="button" id="page-prev" title="Previous page">&#9664;</button>
       <span class="counter" id="page-counter"></span>
-      <button type="button" id="page-next" title="Next page (&#8594; key)">&#9654;</button>
+      <button type="button" id="page-next" title="Next page">&#9654;</button>
+      <span class="navspacer"></span>
+      <button type="button" id="order-btn" title="Reading order">R&#8594;L</button>
+      <button type="button" id="spread-btn" title="Single page or double-page spread">1p</button>
+      <button type="button" id="downloadall-btn" title="Download every translated page">Download all</button>
     </div>
     <div id="results-empty" class="note">Translated pages will appear here — add pages on the left and hit Translate.</div>
     <div id="results"></div>
@@ -313,32 +322,92 @@
     if (hasResults) container.classList.add("wide");
     updateGalleryView();
   }
-  // single-page viewer: one translated page at a time, arrows flip through
+  // ---------- reader view: reading order + single/spread ----------
+  var VIEW_KEY = "manga-viewer";
+  var viewer = { order: "rtl", spread: false };  // manga default: right-to-left
+  try {
+    var savedView = JSON.parse(localStorage.getItem(VIEW_KEY) || "{}");
+    if (savedView.order === "ltr" || savedView.order === "rtl") viewer.order = savedView.order;
+    if (typeof savedView.spread === "boolean") viewer.spread = savedView.spread;
+  } catch (e) {}
+  function saveViewer() { localStorage.setItem(VIEW_KEY, JSON.stringify(viewer)); }
+  function isRtl() { return viewer.order === "rtl"; }
+  // single-page viewer / spread: only the active page(s) show; RTL flips leftward
   function updateGalleryView() {
     var posts = results.querySelectorAll(".reply");
     if (!posts.length) galleryIndex = 0;
     else if (galleryIndex >= posts.length) galleryIndex = posts.length - 1;
+    var active = {};
+    if (viewer.spread && posts.length) {
+      galleryIndex = Math.floor(galleryIndex / 2) * 2;  // snap to the pair's first page
+      active[galleryIndex] = true;
+      if (galleryIndex + 1 < posts.length) active[galleryIndex + 1] = true;
+    } else {
+      active[galleryIndex] = true;
+    }
     for (var i = 0; i < posts.length; i++) {
-      posts[i].classList.toggle("active", i === galleryIndex);
+      posts[i].classList.toggle("active", !!active[i]);
     }
     viewerNav.style.display = posts.length ? "flex" : "none";
-    pageCounter.textContent = posts.length ? (galleryIndex + 1) + " / " + posts.length : "";
+    if (!posts.length) { pageCounter.textContent = ""; return; }
+    if (viewer.spread && active[galleryIndex + 1]) {
+      pageCounter.textContent = (galleryIndex + 1) + "-" + (galleryIndex + 2) + " / " + posts.length;
+    } else {
+      pageCounter.textContent = (galleryIndex + 1) + " / " + posts.length;
+    }
   }
-  function stepGallery(delta) {
+  function stepGallery(dir) {
     var n = results.querySelectorAll(".reply").length;
     if (!n) return;
-    galleryIndex = (galleryIndex + delta + n) % n;
+    var step = viewer.spread ? 2 : 1;
+    galleryIndex = (galleryIndex + dir * step + n * step) % n;
     updateGalleryView();
   }
-  $("page-prev").addEventListener("click", function () { stepGallery(-1); });
-  $("page-next").addEventListener("click", function () { stepGallery(1); });
+  function stepLeft() { stepGallery(isRtl() ? 1 : -1); }   // leftward control
+  function stepRight() { stepGallery(isRtl() ? -1 : 1); }  // rightward control
+  function applyViewerUi() {
+    results.classList.toggle("spread", viewer.spread);
+    results.classList.toggle("rtl", isRtl());
+    $("order-btn").textContent = isRtl() ? "R\u2192L" : "L\u2192R";
+    $("order-btn").title = "Reading order: " + (isRtl() ? "Right-to-Left (manga)" : "Left-to-Right") + " — click to switch";
+    $("spread-btn").textContent = viewer.spread ? "2p" : "1p";
+    $("spread-btn").title = viewer.spread
+      ? "Double-page spread — click for single page"
+      : "Single page — click for double-page spread";
+    $("page-prev").title = isRtl() ? "Next page (\u2190 key)" : "Previous page (\u2190 key)";
+    $("page-next").title = isRtl() ? "Previous page (\u2192 key)" : "Next page (\u2192 key)";
+    updateGalleryView();
+  }
+  $("page-prev").addEventListener("click", stepLeft);
+  $("page-next").addEventListener("click", stepRight);
+  $("order-btn").addEventListener("click", function () {
+    viewer.order = isRtl() ? "ltr" : "rtl";
+    saveViewer();
+    applyViewerUi();
+  });
+  $("spread-btn").addEventListener("click", function () {
+    viewer.spread = !viewer.spread;
+    saveViewer();
+    applyViewerUi();
+  });
+  $("downloadall-btn").addEventListener("click", function () {
+    var anchors = [];
+    results.querySelectorAll(".reply").forEach(function (p) {
+      var a = p.querySelector(".dl a");  // first link per post = the translated page
+      if (a) anchors.push(a);
+    });
+    anchors.forEach(function (a, i) {
+      setTimeout(function () { a.click(); }, i * 350);
+    });
+  });
   document.addEventListener("keydown", function (e) {
     if (!container.classList.contains("wide")) return;
     var tag = (e.target && e.target.tagName) || "";
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-    if (e.key === "ArrowLeft") stepGallery(-1);
-    else if (e.key === "ArrowRight") stepGallery(1);
+    if (e.key === "ArrowLeft") stepLeft();
+    else if (e.key === "ArrowRight") stepRight();
   });
+  applyViewerUi();
   var timer = null;
   var progressTimer = null;
   var lastProgress = null;  // latest /status progress sample for the running job
