@@ -264,17 +264,16 @@
           <span class="note" id="automap-status"></span>
         </div>
         <div class="tblblk">
-          <div class="tblhead">Names <span class="note">(characters — the pronoun guides the translator)</span>
+          <div class="tblhead">Names
             <button type="button" class="mini" id="names-add" title="Add a name row">+</button></div>
           <div class="tbl names" id="names-tbl"></div>
         </div>
         <div class="tblblk">
-          <div class="tblhead">Terms <span class="note">(places, groups, techniques)</span>
+          <div class="tblhead">Terms
             <button type="button" class="mini" id="terms-add" title="Add a term row">+</button></div>
           <div class="tbl terms" id="terms-tbl"></div>
         </div>
-        <label class="check"><input type="checkbox" id="keep-honorifics"> Keep honorifics (-san, -chan…)</label>
-        <div class="note">Empty English cells are ignored. Filled rows apply before translation and are saved per series (once a title is set) — between chapters you only add what's new.</div>
+        <label class="check"><input type="checkbox" id="keep-honorifics"> Keep honorifics</label>
       </div>
     </details>
 
@@ -705,13 +704,13 @@
   function renderNames() {
     var table = $("names-tbl");
     table.innerHTML = "";
-    mkHeader(["JP (as OCR'd)", "English / romaji", "Pronoun", ""]).forEach(function (node) {
+    mkHeader(["JP", "English", "Pronoun", ""]).forEach(function (node) {
       table.appendChild(node);
     });
     if (!namesRows.length) {
       var hint = document.createElement("div");
       hint.className = "hint";
-      hint.textContent = "No names yet — “+” adds a row, or run Automatically Map with pages queued.";
+      hint.textContent = "No names yet.";
       table.appendChild(hint);
     }
     namesRows.forEach(function (row, i) {
@@ -738,13 +737,13 @@
   function renderTerms() {
     var table = $("terms-tbl");
     table.innerHTML = "";
-    mkHeader(["JP (as OCR'd)", "English", "", ""]).forEach(function (node) {
+    mkHeader(["JP", "English", "", ""]).forEach(function (node) {
       table.appendChild(node);
     });
     if (!termsRows.length) {
       var hint = document.createElement("div");
       hint.className = "hint";
-      hint.textContent = "No terms yet — “+” adds a row, or run Automatically Map with pages queued.";
+      hint.textContent = "No terms yet.";
       table.appendChild(hint);
     }
     termsRows.forEach(function (row, i) {
