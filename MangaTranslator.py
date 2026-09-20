@@ -394,6 +394,45 @@ class MangaTranslator:
         else:
             target_width_ratio = 0.82
 
+        # Extreme tall-and-narrow regions (h >= 2.5w) are usually vertical
+        # Japanese columns: laying English out horizontally there collapses
+        # into a tiny hyphenated word-stack. Instead lay the block out in the
+        # swapped dimensions and rotate it 90 degrees clockwise (reads
+        # top-to-bottom) — much larger, legible type. Only used when it
+        # actually beats the horizontal layout, never for regular bubbles.
+        ROTATE_MIN_ASPECT = 2.5
+        rotated_layout = None
+        if box_height >= ROTATE_MIN_ASPECT * box_width:
+            rot_wrap_width = int(box_height * 0.85)
+
+            def try_wrap_rotated(size, allow_hard_break, allow_hyphen):
+                font = self._get_font(size)
+                wrapped = self._wrap_text_dynamic(
+                    text, font, rot_wrap_width,
+                    allow_hard_break=allow_hard_break, allow_hyphen=allow_hyphen,
+                    protected=protected_names,
+                )
+                if wrapped is None:
+                    return None
+                temp_draw = ImageDraw.Draw(Image.new('RGB', (1, 1)))
+                left, top, right, bottom = temp_draw.multiline_textbbox(
+                    (0, 0), wrapped, font=font, align="center"
+                )
+                # After rotation the block runs along the box height and its
+                # thickness along the box width.
+                if (right - left) <= (box_height - vert_margin) and (bottom - top) <= (box_width - side_margin):
+                    return wrapped
+                return None
+
+            for allow_hyphen, allow_hard_break in ((False, False), (True, True)):
+                for size in range(max_size, min_size - 1, -1):
+                    wrapped = try_wrap_rotated(size, allow_hard_break, allow_hyphen)
+                    if wrapped is not None:
+                        rotated_layout = (size, wrapped)
+                        break
+                if rotated_layout:
+                    break
+
         def try_wrap(size, allow_hard_break, allow_hyphen):
             font = self._get_font(size)
             wrapped = self._wrap_text_dynamic(
@@ -418,15 +457,19 @@ class MangaTranslator:
             for size in range(max_size, min_size - 1, -1):
                 wrapped = try_wrap(size, allow_hard_break, allow_hyphen)
                 if wrapped is not None:
-                    return size, wrapped
+                    if rotated_layout and rotated_layout[0] > size:
+                        return rotated_layout[0], rotated_layout[1], True
+                    return size, wrapped, False
 
         # Fallback: minimum size
+        if rotated_layout and rotated_layout[0] > min_size:
+            return rotated_layout[0], rotated_layout[1], True
         font = self._get_font(min_size)
         wrapped = self._wrap_text_dynamic(
             text, font, int(box_width * target_width_ratio),
             allow_hyphen=True, protected=protected_names,
         )
-        return min_size, wrapped
+        return min_size, wrapped, False
 
     def _has_japanese_characters(self, text):
         """Check if text contains Japanese characters"""
@@ -1106,11 +1149,37 @@ Description: {series_info.get('description', 'None')}
             if not text: continue
 
             # Calculate optimal font size for this bubble
-            font_size, wrapped_text = self._calculate_optimal_font_size(
+            font_size, wrapped_text, rotated = self._calculate_optimal_font_size(
                 text, entry['bbox'], shape=entry.get('shape')
             )
 
             font = self._get_font(font_size)
+
+            if rotated:
+                # Vertical column: render the block on its own layer, rotate
+                # it 90 degrees clockwise (reads top-to-bottom), paste centered.
+                left, top, right, bottom = draw.multiline_textbbox(
+                    (0, 0), wrapped_text, font=font, align="center"
+                )
+                pad = 6
+                layer = Image.new(
+                    "RGBA", (int(right - left) + pad * 2, int(bottom - top) + pad * 2),
+                    (0, 0, 0, 0),
+                )
+                layer_draw = ImageDraw.Draw(layer)
+                self._draw_text_with_outline(
+                    layer_draw, (pad - left, pad - top), wrapped_text, font,
+                    text_color=(0, 0, 0, 255), outline_color=(255, 255, 255, 255),
+                    outline_width=2, align="center", spacing=2
+                )
+                layer = layer.rotate(-90, expand=True)
+                img_pil.paste(
+                    layer,
+                    (int(x1 + ((x2 - x1) - layer.width) / 2),
+                     int(y1 + ((y2 - y1) - layer.height) / 2)),
+                    layer,
+                )
+                continue
 
             # Get text dimensions
             left, top, right, bottom = draw.multiline_textbbox(
