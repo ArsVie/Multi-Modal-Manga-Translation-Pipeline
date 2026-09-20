@@ -1258,7 +1258,7 @@ Description: {series_info.get('description', 'None')}
     def process_chapter(self, input_folder, output_folder, series_info=None,
                           batch_size=4, selected_batches=None,
                           conf_threshold=0.15, save_comparisons=False,
-                          on_progress=None):
+                          on_progress=None, on_page=None, cancel_check=None):
             """
             Process manga chapter in batches for better context and efficiency
 
@@ -1266,6 +1266,12 @@ Description: {series_info.get('description', 'None')}
             called as the chapter advances (stage is a short English label,
             done/total are pages, current is the page being worked on). Errors
             raised by the callback are reported and swallowed.
+
+            on_page: optional callback on_page(filename) fired once per page
+            right after its output file is written (used to stream results).
+
+            cancel_check: optional callable; when it returns True the chapter
+            stops at the next page boundary, keeping whatever was written.
             """
             if not os.path.exists(output_folder):
                 os.makedirs(output_folder)
@@ -1304,6 +1310,9 @@ Description: {series_info.get('description', 'None')}
 
             # Process in batches
             for batch_start in range(0, total_files, batch_size):
+                if cancel_check is not None and cancel_check():
+                    print("  [cancel] stop requested \u2014 skipping remaining batches")
+                    break
                 batch_num = batch_start // batch_size + 1
 
                 # Skip if not in selected batches
@@ -1359,6 +1368,9 @@ Description: {series_info.get('description', 'None')}
                 print(f"  Typesetting pages...")
                 report("lettering", done_count, batch_images[0][3] if batch_images else 0)
                 for filename, img, page_id, page_num in batch_images:
+                    if cancel_check is not None and cancel_check():
+                        print("  [cancel] stop requested \u2014 dropping the rest of this batch")
+                        break
                     output_path = os.path.join(output_folder, filename)
 
                     # Filter data for this specific page
@@ -1378,6 +1390,11 @@ Description: {series_info.get('description', 'None')}
                         print(f"    Error typesetting {filename}: {e}")
                     done_count += 1
                     report("lettering", done_count, page_num + 1)  # next page in flight
+                    if on_page is not None:
+                        try:
+                            on_page(filename)
+                        except Exception as exc:
+                            print(f"    [stream] on_page callback failed: {exc}")
 
                 print()  # Empty line between batches
             

@@ -3,7 +3,10 @@
 Endpoints:
     GET  /          -> the web UI (index.html)
     GET  /status    -> readiness of the pipeline and the local LLM server
-    POST /translate -> upload manga pages, get translated images back (base64)
+    POST /translate -> upload manga pages, stream each translated page back
+                       as it finishes (NDJSON: {"type":"page",...} events, then
+                       {"type":"done"} or {"type":"error"})
+    POST /cancel    -> stop the running /translate job at its next page boundary
     POST /suggest-names -> OCR the pages and draft a names/terms list (LLM)
     GET/POST /series-config -> per-series names/terms cache (keyed by title)
     GET  /series-configs -> list saved series configs (for the UI picker)
@@ -28,8 +31,9 @@ from pathlib import Path
 
 import requests
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+import queue
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from MangaTranslator import MangaTranslator
@@ -58,6 +62,9 @@ pipeline_lock = threading.Lock()  # one translate request at a time
 # /status reports a snapshot so the UI can show pages done / percent while a
 # long translation is in flight.
 _progress_lock = threading.Lock()
+# Cancel signal for the running job: set by POST /cancel, reset at job start,
+# checked by the pipeline at page boundaries.
+_cancel_event = threading.Event()
 _progress = {
     "active": False,
     "stage": "",       # unpacking | starting | reading pages | translating text | lettering | done
@@ -244,10 +251,30 @@ def _materialize(files, in_dir):
     return page_names, zip_failures
 
 
-def _process(files, settings):
-    """Run the full pipeline on the uploaded pages. Blocking; runs in a thread."""
+def _page_event(name, out_dir):
+    """Build one streamable result event for a finished page."""
+    out_path = Path(out_dir) / name
+    comparison_path = Path(out_dir) / f"{Path(name).stem}_comparison.png"
+    evt = {"type": "page", "filename": name, "translated_b64": None, "comparison_b64": None}
+    if out_path.exists():
+        evt["translated_b64"] = base64.b64encode(out_path.read_bytes()).decode()
+    else:
+        evt["error"] = "translation failed \u2014 check the server logs"
+    if comparison_path.exists():
+        evt["comparison_b64"] = base64.b64encode(comparison_path.read_bytes()).decode()
+    return evt
+
+
+def _process(files, settings, on_page=None):
+    """Run the full pipeline on the uploaded pages. Blocking; runs in a thread.
+
+    on_page: when given, (filename, out_dir) is called for every page as soon
+    as it is written, so results can stream to the client; the returned page
+    list is then None (the events carry the payloads).
+    """
     assert translator is not None  # the endpoint checks this before dispatching
     with pipeline_lock:
+        _cancel_event.clear()
         _set_progress(active=True, stage="unpacking", done=0, total=0, current=0,
                       started_at=time.time(), finished_at=None)
         translator.set_llm(base_url=settings["llm_base_url"],
@@ -283,7 +310,12 @@ def _process(files, settings):
                 save_comparisons=settings["save_comparisons"],
                 on_progress=lambda stage, done, total, current:
                     _set_progress(stage=stage, done=done, total=total, current=current),
+                on_page=(lambda name: on_page(name, out_dir)) if on_page else None,
+                cancel_check=_cancel_event.is_set,
             )
+
+            if on_page is not None:
+                return None  # every page was already streamed by the callback
 
             pages = []
             for name in page_names:
@@ -302,7 +334,9 @@ def _process(files, settings):
                               "comparison_b64": None, "error": err})
             return pages
         finally:
-            _set_progress(active=False, finished_at=time.time())
+            _set_progress(active=False,
+                          stage=("cancelled" if _cancel_event.is_set() else "idle"),
+                          finished_at=time.time())
             shutil.rmtree(in_dir, ignore_errors=True)
             shutil.rmtree(out_dir, ignore_errors=True)
 
@@ -430,13 +464,45 @@ async def translate(
         "api_key": api_key.strip(),
     }
 
-    try:
-        pages = await run_in_threadpool(_process, uploads, settings)
-    except Exception as exc:
-        _set_progress(stage="failed")
-        raise HTTPException(500, f"Processing failed: {exc}")
+    def event_stream():
+        """NDJSON stream: one page event per finished page, then done/error."""
+        q = queue.Queue()
 
-    return JSONResponse({"pages": pages})
+        def on_page(name, out_dir):
+            q.put(_page_event(name, out_dir))
+
+        def work():
+            try:
+                _process(uploads, settings, on_page=on_page)
+                q.put({"type": "done", "cancelled": _cancel_event.is_set()})
+            except Exception as exc:
+                _set_progress(stage="failed")
+                q.put({"type": "error", "message": str(exc)})
+            finally:
+                q.put(None)
+
+        threading.Thread(target=work, daemon=True).start()
+        try:
+            while True:
+                evt = q.get()
+                if evt is None:
+                    break
+                yield json.dumps(evt) + "\n"
+        finally:
+            # Client went away mid-job \u2014 stop working for nobody.
+            if _progress_snapshot().get("active"):
+                _cancel_event.set()
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
+@app.post("/cancel")
+async def cancel():
+    """Ask the running /translate job to stop at its next page boundary."""
+    if not _progress_snapshot().get("active"):
+        return {"ok": False, "reason": "no job running"}
+    _cancel_event.set()
+    return {"ok": True}
 
 
 class SeriesConfig(BaseModel):

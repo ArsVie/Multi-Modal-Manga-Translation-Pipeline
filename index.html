@@ -152,6 +152,7 @@
   .st.processing { color: #f0c674; }
   .st.done { color: #b5bd68; }
   .st.error { color: #cc6666; }
+  .st.stopped { color: #969896; }
   .err { color: #cc6666; }
   .note { color: #8abeb7; font-size: 9pt; }
 
@@ -204,6 +205,7 @@
 
     <div style="margin-top: 6px;">
       <button id="translate-btn" disabled>Translate</button>
+      <button id="stop-btn" style="display: none;">Stop</button>
       <span id="global-status" class="note"></span>
     </div>
 
@@ -299,6 +301,7 @@
   var items = [];   // [{ file: File, url: objectURL }]
   var $ = function (id) { return document.getElementById(id); };
   var fileInput = $("file-input"), folderInput = $("folder-input"), thumbs = $("thumbs"), button = $("translate-btn");
+  var stopBtn = $("stop-btn");
   var globalStatus = $("global-status"), results = $("results"), dropzone = $("dropzone");
   var resultsEmpty = $("results-empty"), container = document.querySelector(".container");
   var viewerNav = $("viewer-nav"), pageCounter = $("page-counter");
@@ -1119,6 +1122,14 @@
     return "Translating ~" + estPages + " page(s) \u2014 " + tail;
   }
 
+  // Stop button: asks the server to cancel the running job at its next page
+  // boundary; pages that finished keep streaming back before the stream ends.
+  stopBtn.addEventListener("click", function () {
+    stopBtn.disabled = true;
+    stopBtn.textContent = "Stopping\u2026";
+    fetch("/cancel", { method: "POST" }).catch(function () { /* the stream will end */ });
+  });
+
   // Poll /status for the running job's page progress (every 2 s while busy).
   function pollProgress() {
     fetch("/status").then(function (r) { return r.json(); }).then(function (s) {
@@ -1215,6 +1226,9 @@
 
     items.forEach(function (it, i) { setStatus(i, "processing", "processing…"); });
     button.disabled = true;
+    stopBtn.style.display = "";
+    stopBtn.disabled = false;
+    stopBtn.textContent = "Stop";
     busy = true;
     holdStatusUntil = 0;
     results.innerHTML = "";
@@ -1236,49 +1250,86 @@
     progressTimer = setInterval(pollProgress, 2000);
     pollProgress();
 
+    var received = 0, errCount = 0, cancelled = false, streamError = null;
+
+    function handleEvent(evt) {
+      if (evt.type === "page") {
+        results.appendChild(makePost(evt, received));
+        if (evt.error) errCount += 1;
+        if (received < items.length) {
+          setStatus(received, evt.error ? "error" : "done", evt.error ? "error" : "done");
+        }
+        received += 1;
+        updateGalleryEmpty();
+      } else if (evt.type === "done") {
+        cancelled = !!evt.cancelled;
+      } else if (evt.type === "error") {
+        streamError = evt.message || "processing failed";
+      }
+    }
+
+    function endStream() {
+      clearInterval(timer);
+      clearInterval(progressTimer);
+      lastProgress = null;
+      stopBtn.style.display = "none";
+      button.disabled = false;
+      busy = false;
+      updateAutomapBtn();
+      holdStatusUntil = Date.now() + 5 * 60 * 1000;
+      var wall = Math.floor((Date.now() - started) / 1000);
+      if (!streamError && !cancelled && received < items.length) {
+        streamError = "connection ended early — check the server logs";
+      }
+      if (streamError) {
+        for (var i = received; i < items.length; i++) setStatus(i, "error", "failed");
+        globalStatus.textContent = "Error: " + streamError;
+        globalStatus.style.color = "#cc6666";
+        return;
+      }
+      for (var j = received; j < items.length; j++) {
+        setStatus(j, cancelled ? "stopped" : "done", cancelled ? "stopped" : "done");
+      }
+      if (received > 0) savePerPage(wall, received);
+      if (cancelled) {
+        globalStatus.textContent = "Stopped — " + received + "/" + estPages + " page(s) finished and kept.";
+        globalStatus.style.color = "#f0c674";
+      } else {
+        globalStatus.textContent = "Done — " + (received - errCount) + "/" + received + " page(s) translated in " +
+          fmtTime(wall) + " (~" + Math.max(1, Math.round(wall / Math.max(1, received))) + " s/page).";
+        globalStatus.style.color = "#b5bd68";
+      }
+    }
+
     fetch("/translate", { method: "POST", body: fd })
       .then(function (r) {
-        return r.json().then(function (body) {
-          if (!r.ok) throw new Error(body.detail || ("HTTP " + r.status));
-          return body;
-        });
-      })
-      .then(function (body) {
-        clearInterval(timer);
-        clearInterval(progressTimer);
-        lastProgress = null;
-        var perItem = body.pages.length === items.length;
-        if (perItem) {
-          body.pages.forEach(function (page, i) {
-            setStatus(i, page.error ? "error" : "done", page.error ? "error" : "done");
+        if (!r.ok) {
+          return r.json().then(function (body) {
+            throw new Error(body.detail || ("HTTP " + r.status));
           });
-        } else {
-          items.forEach(function (it, i) { setStatus(i, "done", "done"); });
         }
-        body.pages.forEach(function (page, i) { results.appendChild(makePost(page, i)); });
-        updateGalleryEmpty();
-        var ok = body.pages.filter(function (p) { return !p.error; }).length;
-        var wall = Math.floor((Date.now() - started) / 1000);
-        savePerPage(wall, body.pages.length);
-        globalStatus.textContent = "Done — " + ok + "/" + body.pages.length + " page(s) translated in " +
-          fmtTime(wall) + " (~" + Math.max(1, Math.round(wall / Math.max(1, body.pages.length))) + " s/page).";
-        globalStatus.style.color = "#b5bd68";
-        holdStatusUntil = Date.now() + 5 * 60 * 1000;
-        button.disabled = false;
-        busy = false;
-        updateAutomapBtn();
+        var reader = r.body.getReader();
+        var dec = new TextDecoder();
+        var buf = "";
+        function pump() {
+          return reader.read().then(function (res) {
+            if (res.done) return;
+            buf += dec.decode(res.value, { stream: true });
+            var lines = buf.split("\n");
+            buf = lines.pop();
+            lines.forEach(function (line) {
+              line = line.trim();
+              if (line) handleEvent(JSON.parse(line));
+            });
+            return pump();
+          });
+        }
+        return pump();
       })
+      .then(endStream)
       .catch(function (err) {
-        clearInterval(timer);
-        clearInterval(progressTimer);
-        lastProgress = null;
-        items.forEach(function (it, i) { setStatus(i, "error", "failed"); });
-        globalStatus.textContent = "Error: " + err.message;
-        globalStatus.style.color = "#cc6666";
-        holdStatusUntil = Date.now() + 5 * 60 * 1000;
-        button.disabled = false;
-        busy = false;
-        updateAutomapBtn();
+        streamError = err.message || "stream failed";
+        endStream();
       });
   });
 })();
