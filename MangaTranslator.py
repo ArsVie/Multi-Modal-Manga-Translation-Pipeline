@@ -1073,9 +1073,15 @@ Description: {series_info.get('description', 'None')}
 
     def process_chapter(self, input_folder, output_folder, series_info=None,
                           batch_size=4, selected_batches=None,
-                          conf_threshold=0.15, save_comparisons=False):
+                          conf_threshold=0.15, save_comparisons=False,
+                          on_progress=None):
             """
             Process manga chapter in batches for better context and efficiency
+
+            on_progress: optional callback on_progress(stage, done, total, current)
+            called as the chapter advances (stage is a short English label,
+            done/total are pages, current is the page being worked on). Errors
+            raised by the callback are reported and swallowed.
             """
             if not os.path.exists(output_folder):
                 os.makedirs(output_folder)
@@ -1087,6 +1093,18 @@ Description: {series_info.get('description', 'None')}
                                       for t in re.split(r'(\d+)', x)])
 
             total_files = len(files)
+
+            def report(stage, done, current=0):
+                """Tell the caller how far along this chapter is; never fatal."""
+                if on_progress is None:
+                    return
+                try:
+                    on_progress(stage, done, total_files, current)
+                except Exception as exc:
+                    print(f"    [progress] callback failed: {exc}")
+
+            done_count = 0  # pages that have been lettered (or failed) this run
+            report("starting", 0)
             total_batches = (total_files + batch_size - 1) // batch_size
             
             # Master list to hold data for the entire chapter
@@ -1123,6 +1141,7 @@ Description: {series_info.get('description', 'None')}
 
                     input_path = os.path.join(input_folder, filename)
                     page_id = f"p{page_num:03d}"
+                    report("reading pages", done_count, page_num)
 
                     try:
                         img, data = self.detect_and_process(
@@ -1137,7 +1156,7 @@ Description: {series_info.get('description', 'None')}
                         else:
                             print(f"    No bubbles detected")
 
-                        batch_images.append((filename, img, page_id))
+                        batch_images.append((filename, img, page_id, page_num))
 
                     except Exception as e:
                         print(f"    Error processing {filename}: {e}")
@@ -1146,6 +1165,7 @@ Description: {series_info.get('description', 'None')}
                 # Translate entire batch at once for context
                 if batch_data:
                     print(f"  Translating {len(batch_data)} bubbles from batch...")
+                    report("translating text", done_count, batch_images[-1][3])
                     batch_data = self.translate_batch(batch_data, series_info=series_info)
                     
                     # Add this batch's completed data to the master list
@@ -1153,7 +1173,8 @@ Description: {series_info.get('description', 'None')}
 
                 # Typeset each page
                 print(f"  Typesetting pages...")
-                for filename, img, page_id in batch_images:
+                report("lettering", done_count, batch_images[0][3] if batch_images else 0)
+                for filename, img, page_id, page_num in batch_images:
                     output_path = os.path.join(output_folder, filename)
 
                     # Filter data for this specific page
@@ -1171,6 +1192,8 @@ Description: {series_info.get('description', 'None')}
                                                  translated_panel=final_img)
                     except Exception as e:
                         print(f"    Error typesetting {filename}: {e}")
+                    done_count += 1
+                    report("lettering", done_count, page_num + 1)  # next page in flight
 
                 print()  # Empty line between batches
             
@@ -1187,6 +1210,7 @@ Description: {series_info.get('description', 'None')}
                     print(f"  [DEBUG] Failed to save JSON: {e}")
 
             print(f"\n✓ Chapter processing complete! Output saved to: {output_folder}")
+            report("done", done_count)
 
 if __name__ == "__main__":
     # Define custom character/term translations

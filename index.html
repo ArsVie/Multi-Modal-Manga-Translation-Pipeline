@@ -259,6 +259,8 @@
     else if (e.key === "ArrowRight") stepGallery(1);
   });
   var timer = null;
+  var progressTimer = null;
+  var lastProgress = null;  // latest /status progress sample for the running job
   var busy = false;
   var holdStatusUntil = 0;  // keep the last result message visible
 
@@ -615,6 +617,42 @@
     return m + ":" + (s < 10 ? "0" : "") + s;
   }
 
+  // Live status line while a translation runs. `p` is the `progress` object
+  // from /status (absent on older servers) — when it has real page counts the
+  // line shows pages done / percent instead of only an estimate.
+  var STAGE_WORDS = {
+    "unpacking": "unpacking files",
+    "starting": "starting",
+    "reading pages": "reading page",
+    "translating text": "translating text",
+    "lettering": "lettering page"
+  };
+  function progressLine(elapsedS, p, estPages, estTotal) {
+    var left = Math.round(estTotal - elapsedS);
+    var tail = fmtTime(elapsedS) + " elapsed" +
+      (left > 5 ? ", ~" + fmtDuration(left) + " left" : ", finishing up\u2026");
+    if (p && p.active && p.total > 0) {
+      var pct = Math.min(100, Math.round(100 * p.done / p.total));
+      var line = "Translating \u2014 " + p.done + "/" + p.total + " pages done (" + pct + "%)";
+      var stage = STAGE_WORDS[p.stage];
+      if (stage && p.done < p.total) {
+        if ((p.stage === "reading pages" || p.stage === "lettering") && p.current > 0) {
+          stage += " " + p.current + "/" + p.total;   // which page is in flight
+        }
+        line += " \u2014 " + stage;
+      }
+      return line + " \u2014 " + tail;
+    }
+    return "Translating ~" + estPages + " page(s) \u2014 " + tail;
+  }
+
+  // Poll /status for the running job's page progress (every 2 s while busy).
+  function pollProgress() {
+    fetch("/status").then(function (r) { return r.json(); }).then(function (s) {
+      if (busy && s.progress) lastProgress = s.progress;
+    }).catch(function () { /* keep the last sample */ });
+  }
+
   function postNumber(i) {
     return 13000000 + (Math.floor(Date.now() / 100000) % 800000) + i;
   }
@@ -712,15 +750,16 @@
     var estPages = 0;
     items.forEach(function (it) { estPages += (it.pages > 0) ? it.pages : 1; });
     var estTotal = estPages * perPageSeconds();
+    lastProgress = null;
     globalStatus.textContent = "Translating ~" + estPages + " page(s) \u2014 0:00 elapsed, est. " +
       fmtDuration(estTotal) + " total";
     globalStatus.style.color = "#f0c674";
     timer = setInterval(function () {
       var el = Math.floor((Date.now() - started) / 1000);
-      var left = Math.round(estTotal - el);
-      globalStatus.textContent = "Translating ~" + estPages + " page(s) \u2014 " + fmtTime(el) + " elapsed" +
-        (left > 5 ? ", ~" + fmtDuration(left) + " left" : ", finishing up\u2026");
+      globalStatus.textContent = progressLine(el, lastProgress, estPages, estTotal);
     }, 1000);
+    progressTimer = setInterval(pollProgress, 2000);
+    pollProgress();
 
     fetch("/translate", { method: "POST", body: fd })
       .then(function (r) {
@@ -731,6 +770,8 @@
       })
       .then(function (body) {
         clearInterval(timer);
+        clearInterval(progressTimer);
+        lastProgress = null;
         var perItem = body.pages.length === items.length;
         if (perItem) {
           body.pages.forEach(function (page, i) {
@@ -753,6 +794,8 @@
       })
       .catch(function (err) {
         clearInterval(timer);
+        clearInterval(progressTimer);
+        lastProgress = null;
         items.forEach(function (it, i) { setStatus(i, "error", "failed"); });
         globalStatus.textContent = "Error: " + err.message;
         globalStatus.style.color = "#cc6666";

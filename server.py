@@ -16,6 +16,7 @@ import re
 import shutil
 import tempfile
 import threading
+import time
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -43,6 +44,33 @@ VALID_EXTENSIONS = IMAGE_EXTENSIONS + (".zip",)
 translator = None
 load_error = None
 pipeline_lock = threading.Lock()  # one translate request at a time
+
+# Live progress of the running /translate job (pipeline_lock keeps it to one).
+# /status reports a snapshot so the UI can show pages done / percent while a
+# long translation is in flight.
+_progress_lock = threading.Lock()
+_progress = {
+    "active": False,
+    "stage": "",       # unpacking | starting | reading pages | translating text | lettering | done
+    "done": 0,         # pages fully lettered (or failed) so far
+    "total": 0,        # pages in this run (0 until the uploads are unpacked)
+    "current": 0,      # 1-based page currently being worked on
+    "started_at": None,
+    "finished_at": None,
+}
+
+
+def _set_progress(**fields):
+    with _progress_lock:
+        _progress.update(fields)
+
+
+def _progress_snapshot():
+    with _progress_lock:
+        snap = dict(_progress)
+    total = snap["total"]
+    snap["percent"] = max(0, min(100, int(round(100 * snap["done"] / total)))) if total else 0
+    return snap
 
 
 def load_models():
@@ -112,6 +140,7 @@ def status():
         "load_error": load_error,
         "llm_base_url": LLM_BASE_URL,
         "llm_state": _llm_state(LLM_BASE_URL),
+        "progress": _progress_snapshot(),
     }
 
 
@@ -172,6 +201,8 @@ def _process(files, settings):
     """Run the full pipeline on the uploaded pages. Blocking; runs in a thread."""
     assert translator is not None  # the endpoint checks this before dispatching
     with pipeline_lock:
+        _set_progress(active=True, stage="unpacking", done=0, total=0, current=0,
+                      started_at=time.time(), finished_at=None)
         translator.set_llm(base_url=settings["llm_base_url"],
                            model=settings["llm_model"] or None,
                            api_key=settings["api_key"])
@@ -204,6 +235,7 @@ def _process(files, settings):
                 page_names.append(final)
 
             page_names.sort(key=_natural_key)
+            _set_progress(total=len(page_names))
 
             series_info = None
             if settings["title"] or settings["tags"] or settings["description"]:
@@ -220,6 +252,8 @@ def _process(files, settings):
                 batch_size=settings["batch_size"],
                 conf_threshold=settings["conf_threshold"],
                 save_comparisons=settings["save_comparisons"],
+                on_progress=lambda stage, done, total, current:
+                    _set_progress(stage=stage, done=done, total=total, current=current),
             )
 
             pages = []
@@ -239,6 +273,7 @@ def _process(files, settings):
                               "comparison_b64": None, "error": err})
             return pages
         finally:
+            _set_progress(active=False, finished_at=time.time())
             shutil.rmtree(in_dir, ignore_errors=True)
             shutil.rmtree(out_dir, ignore_errors=True)
 
@@ -299,6 +334,7 @@ async def translate(
     try:
         pages = await run_in_threadpool(_process, uploads, settings)
     except Exception as exc:
+        _set_progress(stage="failed")
         raise HTTPException(500, f"Processing failed: {exc}")
 
     return JSONResponse({"pages": pages})
