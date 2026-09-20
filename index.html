@@ -52,7 +52,7 @@
   details.adv > summary::marker { color: #b294bb; }
 
   /* -------- series bar (per-series config picker) -------- */
-  .seriesbar { background: #282a2e; border: 1px solid #282a2e; padding: 8px 10px; margin: 0 0 8px;
+  .seriesbar { background: #282a2e; border: 1px solid #282a2e; padding: 8px 10px; margin: 10px 0 8px;
                display: flex; flex-direction: column; gap: 7px; }
   .seriesrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .seriesrow > label { font-size: 9.5pt; color: #b294bb; font-weight: bold; min-width: 52px; }
@@ -78,13 +78,16 @@
   .tblblk { display: flex; flex-direction: column; gap: 4px; }
   .tblhead { display: flex; align-items: center; gap: 8px; font-weight: bold; }
   .tblhead .note { font-weight: normal; }
-  .tbl { display: grid; gap: 4px; align-items: center; }
+  .tbl { display: grid; gap: 6px; align-items: center; }
   .tbl > * { min-width: 0; }
   .tbl.names { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.15fr) 84px 30px; }
-  .tbl.terms { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1.3fr) 30px; }
-  .tbl .hdr { font-size: 8.5pt; color: #969896; }
+  .tbl.terms { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.15fr) 84px 30px; }
+  .tbl .hdr { font-size: 9pt; color: #9aa1a8; }
   .tbl input, .tbl select { width: 100%; }
   .tbl button { padding: 2px 0; font-size: 9.5pt; }
+  .tbl button.rm { color: #cc9090; }
+  .tbl .hint { grid-column: 1 / -1; color: #969896; font-size: 9pt; padding: 2px 0; }
+  .tblhead button { margin-left: auto; }
   button.mini { padding: 1px 9px; font-size: 11pt; line-height: 1.25; }
 
   input[type=text], input[type=number], input[type=password], textarea, select {
@@ -144,6 +147,14 @@
   button:hover:enabled { background: #81a2be; color: #1d1f21; }
   button:disabled { opacity: .5; cursor: default; }
 
+  /* primary action — the translate button is the CTA of the pre-translation view */
+  .actions { margin-top: 10px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  #translate-btn { padding: 8px 30px; font-size: 11pt; font-weight: bold;
+                   background: #81a2be; color: #1d1f21; border-color: #5F89AC; }
+  #translate-btn:hover:enabled { background: #5F89AC; color: #1d1f21; }
+  /* keep the queue bounded so drop + queue + translate fit one screenful */
+  .container:not(.wide) .thumbs { max-height: 40vh; overflow-y: auto; padding-right: 2px; }
+
   .st { font-weight: bold; font-size: 8pt; }
   .st.queued { color: #585858; }
   .st.processing { color: #f0c674; }
@@ -191,6 +202,19 @@
   <fieldset class="postform">
     <legend>Start a translation</legend>
 
+    <div class="dropzone" id="dropzone">Drop pages, folders or a .zip — or click to browse, or paste with <kbd>Ctrl</kbd>+<kbd>V</kbd>
+      <div class="dz-links">PNG / JPG / WEBP / ZIP · <a id="pick-folder">browse a folder…</a></div>
+    </div>
+    <input type="file" id="file-input" multiple accept="image/jpeg,image/png,image/webp,image/bmp,.zip,application/zip">
+    <input type="file" id="folder-input" webkitdirectory multiple>
+    <div class="note" id="queue-note"></div>
+    <div class="thumbs" id="thumbs"></div>
+
+    <div class="actions">
+      <button id="translate-btn" disabled>Translate</button>
+      <span id="global-status" class="note"></span>
+    </div>
+
     <div class="seriesbar">
       <div class="seriesrow">
         <label for="series-title">Series</label>
@@ -210,14 +234,6 @@
         <textarea id="series-desc" rows="3" placeholder="One-paragraph plot summary — helps tone and character voices"></textarea>
       </label>
     </div>
-
-    <div class="dropzone" id="dropzone">Drop pages, folders or a .zip — or click to browse, or paste with <kbd>Ctrl</kbd>+<kbd>V</kbd>
-      <div class="dz-links">PNG / JPG / WEBP / ZIP · <a id="pick-folder">browse a folder…</a></div>
-    </div>
-    <input type="file" id="file-input" multiple accept="image/jpeg,image/png,image/webp,image/bmp,.zip,application/zip">
-    <input type="file" id="folder-input" webkitdirectory multiple>
-    <div class="note" id="queue-note"></div>
-    <div class="thumbs" id="thumbs"></div>
 
     <details class="adv" id="adv-box">
       <summary>Advanced settings</summary>
@@ -252,7 +268,7 @@
       <summary>Experimental</summary>
       <div class="expwrap">
         <div class="exprow">
-          <button type="button" id="automap-btn" disabled>Automatically Map Terms and Names</button>
+          <button type="button" id="automap-btn" disabled title="Reads the chapter text and drafts names and terms — needs pages in the queue">Automatically Map Terms and Names</button>
           <span class="note" id="automap-status"></span>
         </div>
         <div class="tblblk">
@@ -270,10 +286,7 @@
       </div>
     </details>
 
-    <div style="margin-top: 6px;">
-      <button id="translate-btn" disabled>Translate</button>
-      <span id="global-status" class="note"></span>
-    </div>
+
   </fieldset>
   </div>
 
@@ -703,6 +716,12 @@
     mkHeader(["JP (as OCR'd)", "English / romaji", "Pronoun", ""]).forEach(function (node) {
       table.appendChild(node);
     });
+    if (!namesRows.length) {
+      var hint = document.createElement("div");
+      hint.className = "hint";
+      hint.textContent = "No names yet — “+” adds a row, or run Automatically Map with pages queued.";
+      table.appendChild(hint);
+    }
     namesRows.forEach(function (row, i) {
       var jp = mkCellInput(row.jp, "日本語", "jp");
       jp.addEventListener("input", function () { row.jp = this.value; tableDirty(); });
@@ -727,9 +746,15 @@
   function renderTerms() {
     var table = $("terms-tbl");
     table.innerHTML = "";
-    mkHeader(["JP (as OCR'd)", "English", ""]).forEach(function (node) {
+    mkHeader(["JP (as OCR'd)", "English", "", ""]).forEach(function (node) {
       table.appendChild(node);
     });
+    if (!termsRows.length) {
+      var hint = document.createElement("div");
+      hint.className = "hint";
+      hint.textContent = "No terms yet — “+” adds a row, or run Automatically Map with pages queued.";
+      table.appendChild(hint);
+    }
     termsRows.forEach(function (row, i) {
       var jp = mkCellInput(row.jp, "日本語", "jp");
       jp.addEventListener("input", function () { row.jp = this.value; tableDirty(); });
@@ -737,6 +762,7 @@
       en.addEventListener("input", function () { row.en = this.value; tableDirty(); });
       table.appendChild(jp);
       table.appendChild(en);
+      table.appendChild(document.createElement("div"));  // spacer — keeps column tracks aligned with the names table
       table.appendChild(mkRowRemove(termsRows, i, renderTerms));
     });
   }
