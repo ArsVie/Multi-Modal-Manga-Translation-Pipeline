@@ -170,13 +170,18 @@ class MangaTranslator:
         sorted_bubbles.extend(current_row)
         return sorted_bubbles
 
-    def _wrap_text_dynamic(self, text, font, max_width, allow_hard_break=True):
-        """Wrap text to `max_width`, hyphenating words that do not fit.
+    def _wrap_text_dynamic(self, text, font, max_width, allow_hard_break=True,
+                           allow_hyphen=False, protected=()):
+        """Wrap text to `max_width`, keeping words whole when possible.
 
-        Splits use pyphen syllables, picking the longest prefix that fits a
-        line. Returns None when a word would need a hard (non-syllable) break
-        and `allow_hard_break` is False - callers use that to prefer a smaller
-        font over ugly breaks.
+        A word that does not fit on its own line is left unsplit by default
+        and the function returns None, so callers can drop to a smaller font
+        instead (shrink rather than hyphenate - human-letterer style). With
+        `allow_hyphen=True` the word is split at pyphen syllables, picking
+        the longest prefix that fits a line. With `allow_hard_break=True` an
+        arbitrary (non-syllable) cut is allowed as the last resort. Words in
+        `protected` (character names) are never hyphenated cosmetically;
+        they are hard-cut only when `allow_hard_break` is set.
         """
         lines = []
         current = ""
@@ -197,23 +202,27 @@ class MangaTranslator:
                 current = word
                 continue
 
-            # The word does not fit on a line of its own: split it up.
+            # The word does not fit on a line of its own: split it only when
+            # allowed; protected names skip cosmetic hyphenation.
             pieces = []
             rest = word
+            word_key = re.sub(r"^\W+|\W+$", "", word).lower()
+            hyphenate = allow_hyphen and word_key not in protected
             while not fits(rest):
-                splits = [(a, b) for a, b in self.dic.iterate(rest) if fits(a + "-")]
-                if splits:
-                    start, end = max(splits, key=lambda p: len(p[0]))
-                    pieces.append(start + "-")
-                    rest = end
-                else:
-                    if not allow_hard_break:
-                        return None
-                    cut = 1
-                    while cut < len(rest) - 1 and fits(rest[:cut + 1] + "-"):
-                        cut += 1
-                    pieces.append(rest[:cut] + "-")
-                    rest = rest[cut:]
+                if hyphenate:
+                    splits = [(a, b) for a, b in self.dic.iterate(rest) if fits(a + "-")]
+                    if splits:
+                        start, end = max(splits, key=lambda p: len(p[0]))
+                        pieces.append(start + "-")
+                        rest = end
+                        continue
+                if not allow_hard_break:
+                    return None
+                cut = 1
+                while cut < len(rest) - 1 and fits(rest[:cut + 1] + "-"):
+                    cut += 1
+                pieces.append(rest[:cut] + "-")
+                rest = rest[cut:]
             pieces.append(rest)
             lines.extend(pieces[:-1])
             current = pieces[-1]
@@ -325,7 +334,7 @@ class MangaTranslator:
 
     def _sanitize_for_font(self, text):
         """Replace punctuation the lettering font lacks (Anime Ace draws a
-        missing-glyph box for em dashes and smart quotes)."""
+        missing-glyph box for em dashes, smart quotes and musical notes)."""
         replacements = {
             "\u2014": "--",  # em dash
             "\u2013": "-",   # en dash
@@ -333,16 +342,26 @@ class MangaTranslator:
             "\u2026": "...", # ellipsis
             "\u201c": '"', "\u201d": '"', "\u301d": '"', "\u301e": '"',
             "\u2018": "'", "\u2019": "'",
+            "\u266a": "~",   # musical note (no glyph in font)
+            "\u266b": "~",   # beamed note
         }
         for bad, good in replacements.items():
             text = text.replace(bad, good)
         return text
 
-    def _calculate_optimal_font_size(self, text, bbox, min_size=12, max_size=32, shape=None):
+    def _calculate_optimal_font_size(self, text, bbox, min_size=10, max_size=32, shape=None):
         x1, y1, x2, y2 = bbox
         box_width = x2 - x1
         box_height = y2 - y1
         text = self._sanitize_for_font(text)
+
+        # Character names from the user's term map: never hyphenate these.
+        protected_names = {
+            re.sub(r"^\W+|\W+$", "", w).lower()
+            for value in self.custom_translations.values()
+            for w in str(value).split()
+        }
+        protected_names.discard("")
 
         # Global lettering-size lever (web UI "Lettering size"): shrink the
         # effective box so the chosen size scales down proportionally.
@@ -371,11 +390,12 @@ class MangaTranslator:
         else:
             target_width_ratio = 0.82
 
-        def try_wrap(size, allow_hard_break):
+        def try_wrap(size, allow_hard_break, allow_hyphen):
             font = self._get_font(size)
             wrapped = self._wrap_text_dynamic(
                 text, font, int(box_width * target_width_ratio),
-                allow_hard_break=allow_hard_break,
+                allow_hard_break=allow_hard_break, allow_hyphen=allow_hyphen,
+                protected=protected_names,
             )
             if wrapped is None:
                 return None
@@ -387,16 +407,21 @@ class MangaTranslator:
                 return wrapped
             return None
 
-        # Prefer the largest size without hard breaks; allow them as a fallback
-        for allow_hard_break in (False, True):
+        # Prefer the largest size that keeps words whole (shrink the font
+        # instead of hyphenating, like a human letterer); fall back to
+        # syllable breaks, then hard cuts, only when nothing else fits.
+        for allow_hyphen, allow_hard_break in ((False, False), (True, False), (True, True)):
             for size in range(max_size, min_size - 1, -1):
-                wrapped = try_wrap(size, allow_hard_break)
+                wrapped = try_wrap(size, allow_hard_break, allow_hyphen)
                 if wrapped is not None:
                     return size, wrapped
 
         # Fallback: minimum size
         font = self._get_font(min_size)
-        wrapped = self._wrap_text_dynamic(text, font, int(box_width * target_width_ratio))
+        wrapped = self._wrap_text_dynamic(
+            text, font, int(box_width * target_width_ratio),
+            allow_hyphen=True, protected=protected_names,
+        )
         return min_size, wrapped
 
     def _has_japanese_characters(self, text):

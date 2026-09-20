@@ -166,7 +166,7 @@ It is a quick visual regression check for cleanup quality — see the sheet at t
 - **"LLM server ... is not reachable"** — start llama-server first; `curl http://localhost:8110/health` (503 = still loading, 200 = ready).
 - **No bubbles detected** — lower `conf_threshold` (e.g. `0.10`).
 - **CUDA out of memory** — pass `device="cpu"`, or free VRAM (the LLM server holds ~2.5 GB).
-- **Awkward line breaks** — text is hyphenated to fit bubbles; adjust the size range in `_calculate_optimal_font_size` / `_wrap_text_dynamic`.
+- **Awkward line breaks** — words are kept whole and the font shrinks instead of hyphenating; syllable hyphenation and hard cuts are only last resorts, and names from the custom map are never split. Adjust the size range in `_calculate_optimal_font_size` / `_wrap_text_dynamic`.
 - **Some sound effects stay Japanese** — the detector only finds bubbles and free text it was trained on; SFX are frequently missed. Expected.
 
 ## Known limitations
